@@ -31,6 +31,30 @@ assert_contains() {
   fi
 }
 
+assert_contains_literal() {
+  if [[ "$2" == *"$1"* ]]; then
+    pass "$3"
+  else
+    fail "$3 — text '$1' not found"
+  fi
+}
+
+assert_not_contains_literal() {
+  if [[ "$2" == *"$1"* ]]; then
+    fail "$3 — unexpected text '$1'"
+  else
+    pass "$3"
+  fi
+}
+
+assert_file_absent() {
+  if [[ -e "$1" ]]; then
+    fail "$2 — file still exists: $1"
+  else
+    pass "$2"
+  fi
+}
+
 assert_not_contains() {
   if grep -qE -- "$1" <<< "$2"; then
     fail "$3 — unexpected pattern '$1'"
@@ -64,113 +88,7 @@ assert_no_branch() {
 }
 
 mkdir -p "$TEST_ROOT/bin"
-cat > "$TEST_ROOT/bin/gh" <<'PYEOF'
-#!/usr/bin/env python3
-import fnmatch
-import json
-import os
-import re
-import sys
-
-def arg_value(args, flag):
-    for index, item in enumerate(args):
-        if item == flag and index + 1 < len(args):
-            return args[index + 1]
-    return None
-
-args = sys.argv[1:]
-cmd_line = " ".join(args)
-with open(os.environ["GH_STUB_LOG"], "a") as log:
-    log.write("gh " + cmd_line + "\n")
-for pattern in os.environ.get("GH_STUB_FAIL", "").split(","):
-    if pattern and fnmatch.fnmatch(cmd_line, pattern):
-        sys.exit(1)
-state_file = os.environ["GH_STUB_STATE_FILE"]
-if os.path.exists(state_file):
-    with open(state_file) as handle:
-        state = json.load(handle)
-else:
-    comments = json.loads(
-        os.environ.get("GH_STUB_COMMENTS_JSON", '{"comments":[]}')
-    ).get("comments", [])
-    state = {
-        "pr": {
-            "state": os.environ.get("GH_STUB_STATE", "CLOSED"),
-            "isDraft": os.environ.get("GH_STUB_DRAFT", "false") == "true",
-            "labels": os.environ.get("GH_STUB_LABELS", "").split(),
-            "title": "",
-            "comments": comments,
-        },
-        "repo_labels": os.environ.get(
-            "GH_STUB_REPO_LABELS", "upstream-conflict"
-        ).split(),
-        "next_comment_id": 100,
-    }
-if args[0] == "api":
-    if "-X" in args and "PATCH" in args:
-        match = re.search(r"issues/comments/([0-9]+)", cmd_line)
-        body = None
-        for item in args:
-            if item.startswith("body="):
-                body = item.split("=", 1)[1]
-        if match:
-            for comment in state["pr"]["comments"]:
-                if str(comment["id"]) == match.group(1):
-                    if body is not None:
-                        comment["body"] = body
-                    break
-    else:
-        match = re.search(r"labels/([^/\s]+)", cmd_line)
-        status = "404"
-        if match and match.group(1) in state["repo_labels"]:
-            status = os.environ.get("GH_STUB_HTTP_STATUS", "200")
-        print("HTTP/2 " + status)
-        if int(status) >= 400:
-            sys.exit(1)
-elif args[0] == "pr":
-    sub = args[1] if len(args) > 1 else ""
-    if sub == "view":
-        if "--json labels" in cmd_line:
-            print("\n".join(state["pr"]["labels"]))
-        elif "--json isDraft" in cmd_line:
-            print("true" if state["pr"]["isDraft"] else "false")
-        elif "--json comments" in cmd_line:
-            for comment in state["pr"]["comments"]:
-                if "sync-conflict-notice" in comment.get("body", ""):
-                    print(comment["id"])
-        elif "--json state" in cmd_line:
-            print(state["pr"]["state"])
-        else:
-            print(json.dumps({"state": state["pr"]["state"]}))
-    elif sub == "create":
-        state["pr"]["state"] = "OPEN"
-        state["pr"]["isDraft"] = "--draft" in args
-        title = arg_value(args, "--title")
-        if title is not None:
-            state["pr"]["title"] = title
-    elif sub == "edit":
-        title = arg_value(args, "--title")
-        if title is not None:
-            state["pr"]["title"] = title
-        label = arg_value(args, "--add-label")
-        if label is not None and label not in state["pr"]["labels"]:
-            state["pr"]["labels"].append(label)
-        label = arg_value(args, "--remove-label")
-        if label is not None and label in state["pr"]["labels"]:
-            state["pr"]["labels"].remove(label)
-    elif sub == "ready":
-        state["pr"]["isDraft"] = "--undo" in args
-    elif sub == "comment":
-        state["pr"]["comments"].append({
-            "id": state["next_comment_id"],
-            "body": arg_value(args, "--body") or "",
-        })
-        state["next_comment_id"] += 1
-else:
-    sys.exit(0)
-with open(state_file, "w") as handle:
-    json.dump(state, handle)
-PYEOF
+cp "$SCRIPT_DIR/test-support/gh-stub.py" "$TEST_ROOT/bin/gh"
 chmod +x "$TEST_ROOT/bin/gh"
 export PATH="$TEST_ROOT/bin:$PATH"
 export GH_STUB_LOG="$TEST_ROOT/gh.log"
@@ -181,8 +99,11 @@ export GH_STUB_DRAFT=false
 export GH_STUB_LABELS=''
 export GH_STUB_COMMENTS_JSON='{"comments":[]}'
 export GH_STUB_REPO_LABELS='upstream-conflict'
+export GH_STUB_LOGIN='freebuffed[bot]'
 unset GH_STUB_FAIL
 unset GH_STUB_HTTP_STATUS
+unset GH_STUB_OPEN_PR_NUMBERS
+unset GH_STUB_REPO_LABELS_JSON
 
 fixture_dir=
 fixture_upstream=
@@ -283,6 +204,35 @@ commit_as_bot_on_sync_branch() {
   git -C "$fixture_fork" push -q origin sync/upstream
 }
 
+merge_sync_branch_into_main() {
+  git -C "$fixture_fork" fetch -q origin
+  git -C "$fixture_fork" switch -q -C main origin/main
+  git -C "$fixture_fork" merge -q --no-ff -m "Merge sync/upstream" origin/sync/upstream
+  git -C "$fixture_fork" push -q origin main
+}
+
+squash_sync_branch_into_main() {
+  git -C "$fixture_fork" fetch -q origin
+  git -C "$fixture_fork" switch -q -C main origin/main
+  git -C "$fixture_fork" merge -q --squash origin/sync/upstream
+  git -C "$fixture_fork" commit -qm "chore(upstream): squash sync"
+  git -C "$fixture_fork" push -q origin main
+}
+
+rebase_sync_branch_into_main() {
+  git -C "$fixture_fork" fetch -q origin
+  git -C "$fixture_fork" switch -q -C main origin/main
+  echo "pre-merge fork change" > "$fixture_fork/pre-merge.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork change before rebase merge"
+  git -C "$fixture_fork" push -q origin main
+  git -C "$fixture_fork" switch -q -C rebased-sync origin/sync/upstream
+  git -C "$fixture_fork" rebase -q main
+  git -C "$fixture_fork" switch -q main
+  git -C "$fixture_fork" merge -q --ff-only rebased-sync
+  git -C "$fixture_fork" push -q origin main
+}
+
 branch_file() { git -C "$fixture_work" show "origin/sync/upstream:$1" 2>/dev/null; }
 branch_log() {
   git -C "$fixture_work" log --oneline --format='%h %an %s' origin/sync/upstream 2>/dev/null
@@ -296,6 +246,14 @@ origin_has_branch() {
   [[ -n "$tip" ]]
 }
 
+assert_branch_descends_from_main() {
+  if git -C "$fixture_work" merge-base --is-ancestor origin/main origin/sync/upstream; then
+    pass "$1"
+  else
+    fail "$1 — sync/upstream is not based on current main"
+  fi
+}
+
 gh_log() {
   if [[ ! -e "$GH_STUB_LOG" ]]; then
     echo "gh_log: $GH_STUB_LOG is missing — the gh stub never wrote a log for this fixture" >&2
@@ -304,8 +262,11 @@ gh_log() {
   cat "$GH_STUB_LOG"
 }
 
-NOTICE_COMMENT_JSON='{"comments":[{"id":42,"body":"<!-- sync-conflict-notice -->"}]}'
+NOTICE_COMMENT_JSON='{"comments":[{"id":"IC_kwDOT2TnS86Y42","rest_id":42,"user":{"login":"freebuffed[bot]"},"body":"<!-- sync-conflict-notice -->"}]}'
 readonly NOTICE_COMMENT_JSON
+
+MIXED_NOTICE_COMMENT_JSON='{"comments":[{"id":"IC_kwDOT2TnS86Y41","rest_id":41,"user":{"login":"maintainer"},"body":"<!-- sync-conflict-notice -->\npublic comment"},{"id":"IC_kwDOT2TnS86Y42","rest_id":42,"user":{"login":"freebuffed[bot]"},"body":"context\n<!-- sync-conflict-notice -->\nmisplaced marker"},{"id":"IC_kwDOT2TnS86Y43","rest_id":43,"user":{"login":"freebuffed[bot]"},"body":"<!-- sync-conflict-notice -->\nautomation comment"}]}'
+readonly MIXED_NOTICE_COMMENT_JSON
 
 commit_on_main_branch() {
   git -C "$fixture_fork" switch -q main
@@ -328,8 +289,11 @@ reset_gh() {
   export GH_STUB_LABELS=''
   export GH_STUB_COMMENTS_JSON='{"comments":[]}'
   export GH_STUB_REPO_LABELS='upstream-conflict'
+  export GH_STUB_LOGIN='freebuffed[bot]'
   unset GH_STUB_FAIL
   unset GH_STUB_HTTP_STATUS
+  unset GH_STUB_OPEN_PR_NUMBERS
+  unset GH_STUB_REPO_LABELS_JSON
 }
 
 test_already_up_to_date() {
@@ -339,6 +303,12 @@ test_already_up_to_date() {
   assert_contains "Up to date" "$(sync_out)" "reports up to date"
   assert_no_branch "creates no branch"
   assert_not_contains "pr create" "$(gh_log)" "creates no PR"
+}
+
+test_pr_module_sourcing_has_no_side_effects() {
+  module_output=$(bash -c 'source "$1"; printf loaded' _ \
+    "$SCRIPT_DIR/sync-upstream-pr.sh")
+  assert_equals "loaded" "$module_output" "PR module can be sourced without work"
 }
 
 test_clean_upstream_update() {
@@ -356,6 +326,17 @@ test_clean_upstream_update() {
   assert_equals "fork readme" "$(branch_file README.md)" "fork-local README intact"
   assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" "marker advanced to upstream head"
   assert_contains "pr create" "$(gh_log)" "PR created"
+}
+
+test_body_file_path_with_spaces() {
+  new_fixture "body-file-spaces"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  body_tmp_dir="$fixture_dir/tmp directory"
+  mkdir -p "$body_tmp_dir"
+
+  run_sync_with_env TMPDIR="$body_tmp_dir"
+  assert_equals "0" "$status" "body-file path with spaces succeeds"
 }
 
 test_conflict_then_resolution() {
@@ -401,6 +382,8 @@ test_conflict_then_resolution() {
   assert_contains "pr edit sync/upstream --remove-label upstream-conflict" \
     "$gh_actions" "conflict label removed"
   assert_contains "PATCH" "$gh_actions" "stale conflict notice updated to resolved"
+  assert_contains "ready for review" "$(cat "$TEST_ROOT/gh-state.json")" \
+    "stale conflict notice body updated"
   assert_not_contains "pr comment" "$gh_actions" "no new comment posted on resolution"
   GH_STUB_LABELS=''
 }
@@ -629,6 +612,41 @@ test_conflict_notice_lists_files_as_bullets() {
   assert_contains "file with spaces.txt" "$(sync_out)" "spaced filename kept intact in the log"
 }
 
+test_conflict_notice_formats_special_paths() {
+  new_fixture "notice-special-paths"
+  newline_file=$'line\nbreak.txt'
+  backtick_file='back`tick.txt'
+  tab_file=$'tab\tname.txt'
+  commit_on_main_branch "$newline_file" "fork line" "fix: fork-local newline path edit"
+  commit_on_main_branch "$backtick_file" "fork line" "fix: fork-local backtick path edit"
+  commit_on_main_branch "$tab_file" "fork line" "fix: fork-local tab path edit"
+  printf 'upstream\n' > "$fixture_upstream/$newline_file"
+  printf 'upstream\n' > "$fixture_upstream/$backtick_file"
+  printf 'upstream\n' > "$fixture_upstream/$tab_file"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "special-path conflict sync exits 0"
+  notice_body=$(python3 - "$TEST_ROOT/gh-state.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    state = json.load(handle)
+print(state["pr"]["comments"][-1]["body"])
+PY
+  )
+  tick=$(printf '\140')
+  assert_contains_literal "- ${tick}line\\x0Abreak.txt${tick}" "$notice_body" \
+    "newline path is escaped as one notice bullet"
+  assert_contains_literal "- ${tick}${tick}back${tick}tick.txt${tick}${tick}" "$notice_body" \
+    "backtick path uses a safe code span"
+  assert_contains_literal "- ${tick}tab\\x09name.txt${tick}" "$notice_body" \
+    "tab path is escaped as one notice bullet"
+  assert_not_contains_literal $'line\nbreak.txt' "$notice_body" \
+    "notice does not contain a raw newline path"
+}
+
 test_missing_token_in_ci_mode() {
   new_fixture "missing-token"
   echo "v2" > "$fixture_upstream/a.txt"
@@ -637,6 +655,56 @@ test_missing_token_in_ci_mode() {
   run_sync_ci
   assert_status_failed "missing token fails"
   assert_contains "GH_TOKEN is empty" "$(sync_err)" "missing token reported"
+}
+
+test_ci_push_does_not_expose_token_in_argv() {
+  new_fixture "ci-push-credentials"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+
+  git_wrapper_dir="$fixture_dir/git-wrapper"
+  mkdir -p "$git_wrapper_dir"
+  real_git=$(command -v git)
+  cat > "$git_wrapper_dir/git" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "push" ]]; then
+  printf '%s\n' "$*" > "$GIT_PUSH_ARGS_FILE"
+  if [[ -n "${GIT_ASKPASS:-}" ]]; then
+    printf '%s\n' "$GIT_ASKPASS" > "$GIT_ASKPASS_PATH_FILE"
+    ls -ld "$GIT_ASKPASS" | awk '{print substr($1, 1, 10)}' > "$GIT_ASKPASS_MODE_FILE"
+  else
+    : > "$GIT_ASKPASS_PATH_FILE"
+    : > "$GIT_ASKPASS_MODE_FILE"
+  fi
+  args=("$@")
+  if [[ "${args[1]:-}" == https://*github.com/* ]]; then
+    args[1]="$FIXTURE_ORIGIN"
+  fi
+  exec "$REAL_GIT" "${args[@]}"
+fi
+
+exec "$REAL_GIT" "$@"
+BASH
+  chmod +x "$git_wrapper_dir/git"
+
+  run_sync_with_env \
+    GITHUB_ACTIONS=true \
+    GH_TOKEN='ci-test-token' \
+    PATH="$git_wrapper_dir:$PATH" \
+    REAL_GIT="$real_git" \
+    FIXTURE_ORIGIN="$fixture_dir/origin.git" \
+    GIT_PUSH_ARGS_FILE="$fixture_dir/git-push-args" \
+    GIT_ASKPASS_PATH_FILE="$fixture_dir/git-askpass-path" \
+    GIT_ASKPASS_MODE_FILE="$fixture_dir/git-askpass-mode"
+  assert_equals "0" "$status" "CI push succeeds with the credential helper"
+  assert_not_contains "ci-test-token" "$(cat "$fixture_dir/git-push-args")" \
+    "CI push does not place the token in git arguments"
+  assert_equals "-rwx------" "$(cat "$fixture_dir/git-askpass-mode")" \
+    "credential helper has restrictive permissions"
+  askpass_path=$(cat "$fixture_dir/git-askpass-path")
+  assert_file_absent "$askpass_path" "credential helper is removed after the push"
 }
 
 test_open_pr_title_advances() {
@@ -659,6 +727,20 @@ test_open_pr_title_advances() {
   gh_actions=$(gh_log)
   assert_title_edited "0.0.147" "$gh_actions"
   assert_not_contains "pr create" "$gh_actions" "PR reused, not recreated"
+}
+
+test_open_pr_title_unchanged_is_not_edited() {
+  new_fixture "open-pr-title-unchanged"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  : > "$GH_STUB_LOG"
+  run_sync
+  assert_equals "0" "$status" "unchanged-title sync exits 0"
+  assert_not_contains "pr edit sync/upstream --title" "$(gh_log)" \
+    "unchanged PR title is not edited"
 }
 
 test_title_fallback_to_unknown() {
@@ -719,6 +801,32 @@ test_new_conflicted_pr_created_draft() {
     "$gh_actions" "conflict label added at create"
   assert_not_contains "pr ready --undo" "$gh_actions" "fresh create never drafts via ready --undo"
   assert_contains "pr comment" "$gh_actions" "conflict comment posted"
+}
+
+test_remaining_separator_marker_keeps_pr_in_conflict_state() {
+  new_fixture "remaining-separator-marker"
+  commit_on_main_branch "a.txt" "fork line" "fix: fork-local edit"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "first conflicted sync exits 0"
+
+  switch_to_sync_branch
+  printf '=======\n' > "$fixture_fork/a.txt"
+  commit_on_sync_branch "fix: partial conflict resolution"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  GH_STUB_LABELS='upstream-conflict'
+
+  run_sync
+  assert_equals "0" "$status" "separator-marker sync exits 0"
+  gh_actions=$(gh_log)
+  assert_not_contains "pr ready sync/upstream" "$gh_actions" \
+    "separator marker keeps PR in draft state"
+  assert_not_contains "pr edit sync/upstream --remove-label upstream-conflict" \
+    "$gh_actions" "separator marker keeps conflict label"
 }
 
 test_apply_failure_not_misclassified() {
@@ -804,6 +912,7 @@ EOF
   echo "more" > "$fixture_upstream/c.txt"
   upstream_commit "c3"
   reset_gh
+  GH_STUB_STATE=OPEN
 
   run_sync
   assert_status_failed "push rejected when remote advanced"
@@ -811,22 +920,23 @@ EOF
   assert_not_contains "pr create" "$(gh_log)" "no PR created after failed push"
 }
 
-test_closed_pr_with_live_branch() {
+test_closed_pr_branch_not_reused() {
   new_fixture "closed-pr"
   echo "upstream file" > "$fixture_upstream/b.txt"
   upstream_commit "c2"
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
+  old_tip=$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')
 
   echo "more" > "$fixture_upstream/c.txt"
   upstream_commit "c3"
   reset_gh
 
   run_sync
-  assert_equals "0" "$status" "second sync exits 0"
-  gh_actions=$(gh_log)
-  assert_contains "pr create" "$gh_actions" "new PR created for closed PR"
-  assert_equals "2" "$(grep -c 'chore(upstream)' <<< "$(branch_log)")" "two sync commits appended"
+  assert_status_failed "closed PR does not reuse its branch"
+  assert_equals "$old_tip" \
+    "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')" \
+    "closed PR branch remains unchanged"
 }
 
 test_merged_pr_not_recreated() {
@@ -849,6 +959,116 @@ test_merged_pr_not_recreated() {
   gh_actions=$(gh_log)
   assert_not_contains "pr create" "$gh_actions" "no PR recreated after merge"
   assert_not_contains "pr ready" "$gh_actions" "no draft toggling after merge"
+}
+
+test_merged_pr_uses_current_main_after_merge_commit() {
+  new_fixture "merged-pr-current-main-merge"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  merge_sync_branch_into_main
+  commit_on_main_branch "a.txt" "fork line after merge" "fix: main edit after merge"
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+  reset_gh
+  GH_STUB_STATE=MERGED
+
+  run_sync
+  assert_equals "0" "$status" "merge-commit follow-up exits 0"
+  assert_contains '^<<<<<<< ' "$(branch_file a.txt)" \
+    "merge-commit follow-up leaves conflict markers"
+  assert_contains "fork line after merge" "$(branch_file a.txt)" \
+    "merge-commit follow-up keeps the main change"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" \
+    "merge-commit follow-up advances the marker"
+  assert_branch_descends_from_main "merge-commit follow-up uses current main"
+  assert_contains "pr create --draft" "$(gh_log)" \
+    "merge-commit follow-up creates a draft conflict PR"
+}
+
+test_merged_pr_uses_current_main_after_squash_merge() {
+  new_fixture "merged-pr-current-main-squash"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  squash_sync_branch_into_main
+  commit_on_main_branch "a.txt" "fork line after squash" "fix: main edit after squash"
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+  reset_gh
+  GH_STUB_STATE=MERGED
+
+  run_sync
+  assert_equals "0" "$status" "squash follow-up exits 0"
+  assert_contains '^<<<<<<< ' "$(branch_file a.txt)" \
+    "squash follow-up leaves conflict markers"
+  assert_contains "fork line after squash" "$(branch_file a.txt)" \
+    "squash follow-up keeps the main change"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" \
+    "squash follow-up advances the marker"
+  assert_branch_descends_from_main "squash follow-up uses current main"
+  assert_contains "pr create --draft" "$(gh_log)" \
+    "squash follow-up creates a draft conflict PR"
+}
+
+test_merged_pr_uses_current_main_after_rebase_merge() {
+  new_fixture "merged-pr-current-main-rebase"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  rebase_sync_branch_into_main
+  commit_on_main_branch "a.txt" "fork line after rebase" "fix: main edit after rebase"
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+  reset_gh
+  GH_STUB_STATE=MERGED
+
+  run_sync
+  assert_equals "0" "$status" "rebase follow-up exits 0"
+  assert_contains '^<<<<<<< ' "$(branch_file a.txt)" \
+    "rebase follow-up leaves conflict markers"
+  assert_contains "fork line after rebase" "$(branch_file a.txt)" \
+    "rebase follow-up keeps the main change"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" \
+    "rebase follow-up advances the marker"
+  assert_branch_descends_from_main "rebase follow-up uses current main"
+  assert_contains "pr create --draft" "$(gh_log)" \
+    "rebase follow-up creates a draft conflict PR"
+}
+
+test_reconcile_pr_state_read_failure_does_not_create_duplicate() {
+  new_fixture "reconcile-state-read-failure"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  merge_sync_branch_into_main
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+  reset_gh
+  GH_STUB_STATE=OPEN
+  export GH_STUB_FAIL='pr list*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "open PR lookup failure stops reconciliation"
+  assert_contains "could not determine whether an open pull request exists" \
+    "$(sync_err)" "open PR lookup failure is reported"
+  assert_not_contains "pr create" "$(gh_log)" \
+    "open PR lookup failure does not create a duplicate PR"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" \
+    "sync commit remains available after reconciliation failure"
 }
 
 test_gh_create_failure_aborts() {
@@ -1039,9 +1259,11 @@ test_conflict_notice_updated_for_later_conflict() {
   assert_not_contains "sync/upstream:" "$gh_actions" "notice lists plain paths, not rev-prefixed"
   assert_not_contains "pr comment" "$gh_actions" "existing notice not recreated"
   assert_contains "PATCH" "$gh_actions" "existing notice updated in place"
+  assert_contains "b.txt" "$(cat "$TEST_ROOT/gh-state.json")" \
+    "existing notice body updated with the later conflict"
 }
 
-test_state_read_failure_reconciled() {
+test_state_read_failure_leaves_branch_unchanged() {
   new_fixture "state-read-recovery"
   echo "upstream file" > "$fixture_upstream/b.txt"
   upstream_commit "c2"
@@ -1053,11 +1275,68 @@ test_state_read_failure_reconciled() {
   reset_gh
   GH_STUB_STATE=OPEN
   export GH_STUB_FAIL='pr view sync/upstream --json state*'
+  old_tip=$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')
 
   run_sync
   unset GH_STUB_FAIL
-  assert_equals "0" "$status" "state read failure does not skip reconciliation"
-  assert_contains "pr create" "$(gh_log)" "reconcile runs after state read failure"
+  assert_status_failed "state read failure stops the sync"
+  assert_equals "$old_tip" \
+    "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')" \
+    "state read failure leaves the branch unchanged"
+}
+
+test_duplicate_open_pr_lookup_fails() {
+  new_fixture "duplicate-open-pr"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  export GH_STUB_OPEN_PR_NUMBERS='5,6'
+
+  run_sync
+  unset GH_STUB_OPEN_PR_NUMBERS
+  assert_status_failed "duplicate open PR lookup fails"
+  assert_contains "more than one open pull request" "$(sync_err)" \
+    "duplicate open PR lookup is reported"
+  assert_not_contains "pr create" "$(gh_log)" \
+    "duplicate open PR lookup does not create a PR"
+}
+
+test_conflict_notice_updates_only_owned_exact_marker() {
+  new_fixture "owned-conflict-notice"
+  commit_on_main_branch "a.txt" "fork line" "fix: fork-local edit"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first conflicted sync exits 0"
+
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  export GH_STUB_COMMENTS_JSON="$MIXED_NOTICE_COMMENT_JSON"
+
+  run_sync
+  unset GH_STUB_COMMENTS_JSON
+  assert_equals "0" "$status" "owned notice sync exits 0"
+  gh_actions=$(gh_log)
+  assert_contains "issues/comments/43" "$gh_actions" \
+    "automation notice is updated"
+  assert_not_contains "issues/comments/41" "$gh_actions" \
+    "maintainer notice is not updated"
+  assert_not_contains "issues/comments/42" "$gh_actions" \
+    "misplaced marker is not updated"
+  gh_state=$(cat "$TEST_ROOT/gh-state.json")
+  assert_contains "public comment" "$gh_state" \
+    "maintainer comment remains unchanged"
+  assert_contains "misplaced marker" "$gh_state" \
+    "misplaced marker comment remains unchanged"
+  assert_contains "a.txt" "$gh_state" \
+    "automation notice contains the conflict update"
 }
 
 test_missing_conflict_label_fails() {
@@ -1072,6 +1351,35 @@ test_missing_conflict_label_fails() {
   assert_no_branch "no branch created"
 }
 
+test_special_conflict_label_is_matched_as_data() {
+  new_fixture "special-label"
+  export GH_STUB_REPO_LABELS_JSON='["label with spaces","label/with%percent","label – unicode"]'
+
+  run_sync_with_env SYNC_CONFLICT_LABEL='label/with%percent'
+  unset GH_STUB_REPO_LABELS_JSON
+  assert_equals "0" "$status" "special conflict label sync exits 0"
+}
+
+test_invalid_conflict_label_fails_before_api_call() {
+  new_fixture "invalid-label"
+
+  run_sync_with_env SYNC_CONFLICT_LABEL='invalid,label'
+  assert_status_failed "comma in conflict label fails"
+  assert_contains "must not contain commas" "$(sync_err)" \
+    "invalid conflict label is reported"
+  assert_not_contains "api" "$(gh_log)" \
+    "invalid conflict label does not call GitHub"
+
+  new_fixture "control-character-label"
+
+  run_sync_with_env SYNC_CONFLICT_LABEL=$'invalid\nlabel'
+  assert_status_failed "control character in conflict label fails"
+  assert_contains "must not contain commas or control characters" "$(sync_err)" \
+    "control character in conflict label is reported"
+  assert_not_contains "api" "$(gh_log)" \
+    "control character in conflict label does not call GitHub"
+}
+
 test_conflict_label_api_failure_fails() {
   new_fixture "label-api-failure"
   export GH_STUB_HTTP_STATUS=500
@@ -1084,12 +1392,12 @@ test_conflict_label_api_failure_fails() {
   assert_no_branch "no branch created"
 
   new_fixture "label-api-call-failure"
-  export GH_STUB_FAIL='api repos/LMLiam/freebuffed/labels/*'
+  export GH_STUB_FAIL='api *repos/LMLiam/freebuffed/labels*'
 
   run_sync
   unset GH_STUB_FAIL
   assert_status_failed "label API call failure fails the sync"
-  assert_contains "status unknown" "$(sync_err)" "failed API call reported as unknown status"
+  assert_contains "could not read label" "$(sync_err)" "failed API call reported as an API failure"
   assert_not_contains "does not exist" "$(sync_err)" "call failure not reported as missing label"
 }
 
@@ -1133,19 +1441,12 @@ test_invalid_version_json_fails() {
 test_stub_models_gh_state() {
   new_fixture "stub-state"
   export GH_STUB_REPO_LABELS=''
-  if gh api "repos/LMLiam/freebuffed/labels/upstream-conflict" \
-    --silent --include >/dev/null 2>&1; then
-    fail "missing repo label returned success"
-  else
-    pass "missing repo label returns 404"
-  fi
+  labels=$(gh api --paginate "repos/LMLiam/freebuffed/labels" --jq '.[].name')
+  assert_equals "" "$labels" "missing repo label returns an empty list"
+  rm -f "$TEST_ROOT/gh-state.json"
   GH_STUB_REPO_LABELS='upstream-conflict'
-  if gh api "repos/LMLiam/freebuffed/labels/upstream-conflict" \
-    --silent --include >/dev/null 2>&1; then
-    pass "existing repo label returns 200"
-  else
-    fail "existing repo label returned failure"
-  fi
+  labels=$(gh api --paginate "repos/LMLiam/freebuffed/labels" --jq '.[].name')
+  assert_equals "upstream-conflict" "$labels" "existing repo label is listed"
   rm -f "$TEST_ROOT/gh-state.json"
   gh pr create --draft --base main --head sync/upstream --title "test title" >/dev/null 2>&1
   is_draft=$(gh pr view sync/upstream --json isDraft --jq '.isDraft')
@@ -1163,7 +1464,11 @@ test_stub_models_gh_state() {
 notice"
   notice_ids=$(gh pr view sync/upstream --json comments \
     --jq '.comments[] | select(.body | contains("sync-conflict-notice")) | .id')
-  assert_equals "100" "$notice_ids" "posted notice returned by the id lookup"
+  assert_equals "IC_kwDOT2TnS86Y100" "$notice_ids" \
+    "GraphQL view returns the node id"
+  rest_notice_ids=$(gh api --paginate "repos/LMLiam/freebuffed/issues/5/comments" \
+    --jq '.[] | select(.body | contains("sync-conflict-notice")) | .id')
+  assert_equals "100" "$rest_notice_ids" "REST comment list returns the numeric id"
   gh api -X PATCH "repos/LMLiam/freebuffed/issues/comments/100" -f body="resolved body"
   assert_contains "PATCH" "$(gh_log)" "notice PATCH issued"
   assert_contains "resolved body" \
@@ -1173,7 +1478,9 @@ notice"
 run_all_tests() {
   local tests=(
     test_already_up_to_date
+    test_pr_module_sourcing_has_no_side_effects
     test_clean_upstream_update
+    test_body_file_path_with_spaces
     test_conflict_then_resolution
     test_excluded_only_change_advances_marker
     test_existing_branch_appends
@@ -1186,17 +1493,26 @@ run_all_tests() {
     test_version_from_synced_tree
     test_filenames_with_spaces
     test_missing_token_in_ci_mode
+    test_ci_push_does_not_expose_token_in_argv
     test_open_pr_title_advances
+    test_open_pr_title_unchanged_is_not_edited
     test_manual_draft_left_alone
     test_new_conflicted_pr_created_draft
+    test_remaining_separator_marker_keeps_pr_in_conflict_state
     test_apply_failure_not_misclassified
     test_marker_example_outside_change_set
     test_conflict_notice_non_ascii_path
     test_conflict_notice_lists_files_as_bullets
+    test_conflict_notice_formats_special_paths
     test_missing_and_invalid_branch_marker
     test_remote_advance_rejects_push
-    test_closed_pr_with_live_branch
+    test_closed_pr_branch_not_reused
     test_merged_pr_not_recreated
+    test_merged_pr_uses_current_main_after_merge_commit
+    test_merged_pr_uses_current_main_after_squash_merge
+    test_merged_pr_uses_current_main_after_rebase_merge
+    test_reconcile_pr_state_read_failure_does_not_create_duplicate
+    test_duplicate_open_pr_lookup_fails
     test_gh_create_failure_aborts
     test_gh_edit_failure_aborts
     test_title_reconciled_after_failure
@@ -1204,17 +1520,20 @@ run_all_tests() {
     test_label_failure_reconciled
     test_ready_failure_reconciled
     test_labels_read_failure_aborts
-    test_state_read_failure_reconciled
+    test_state_read_failure_leaves_branch_unchanged
     test_comment_failure_reconciled
     test_conflict_notice_updated_for_later_conflict
+    test_conflict_notice_updates_only_owned_exact_marker
     test_missing_conflict_label_fails
+    test_special_conflict_label_is_matched_as_data
+    test_invalid_conflict_label_fails_before_api_call
     test_conflict_label_api_failure_fails
     test_conflict_label_failure_aborts
     test_missing_version_file_fails
     test_invalid_version_json_fails
     test_stub_models_gh_state
   )
-  local selected=()
+  local -a selected=()
   local test_fn
   local name
   if [[ -n "${TESTS:-}" ]]; then
