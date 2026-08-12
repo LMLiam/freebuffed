@@ -3,8 +3,7 @@
 # Sync changes from the Freebuff upstream mirror into a `sync/upstream`
 # branch, then open or update the sync pull request.
 #
-# The workflow .github/workflows/sync-upstream.yml runs this automatically.
-# You can also run it locally to sync manually.
+# The workflow .github/workflows/sync-upstream.yml runs this.
 #
 # Conflicts stay in the pull request. The sync applies upstream changes with a
 # three-way merge: files that both sides changed are left with conflict
@@ -13,7 +12,7 @@
 # follow-up commit.
 #
 # Usage:
-#   bash scripts/sync-upstream.sh
+#   bash .github/scripts/sync-upstream.sh
 set -euo pipefail
 
 UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/CodebuffAI/freebuff.git}"
@@ -34,8 +33,6 @@ EXCLUDES=(
   ':(exclude)release-please-config.json'
   ':(exclude).release-please-manifest.json'
   ':(exclude)CHANGELOG.md'
-  ':(exclude)scripts/sync-upstream.sh'
-  ':(exclude)scripts/upstream-sync-check.sh'
 )
 
 cd "$(git rev-parse --show-toplevel)"
@@ -70,6 +67,24 @@ git diff --full-index "$marker" FETCH_HEAD -- . "${EXCLUDES[@]}" > /tmp/upstream
 if [[ ! -s /tmp/upstream-sync.patch ]]; then
   echo "No upstream changes outside the fork-local paths"
   exit 0
+fi
+
+# Never overwrite manual changes on the sync branch. If the branch's tip is
+# not the bot's own commit, a human is working on the pull request — stop and
+# wait. The marker advances when the pull request merges, so the sync resumes
+# cleanly from there.
+remote_tip=$(git ls-remote origin "refs/heads/$SYNC_BRANCH" | awk '{print $1}')
+if [[ -n "$remote_tip" ]]; then
+  tip_name=$(git log -1 --format='%cn' "$remote_tip" 2>/dev/null || true)
+  if [[ "$tip_name" != "$COMMIT_NAME" ]]; then
+    echo "Sync branch $SYNC_BRANCH has manual changes (tip by ${tip_name:-unknown}) — not overwriting."
+    if gh pr view "$SYNC_BRANCH" --json number --jq '.number' >/dev/null 2>&1; then
+      if ! gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "has manual changes"; then
+        gh pr comment "$SYNC_BRANCH" --body "The bot paused: $SYNC_BRANCH has manual changes and will not be overwritten. Merge the pull request when ready — the next sync resumes once the marker advances."
+      fi
+    fi
+    exit 0
+  fi
 fi
 
 if git branch --list "$SYNC_BRANCH" | grep -q .; then
@@ -116,10 +131,6 @@ if gh pr view "$SYNC_BRANCH" --json number --jq '.number' >/dev/null 2>&1; then
 else
   cat > /tmp/sync-pr-body.md <<'EOF'
 Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
-
-Brings the upstream commits since the last sync. Fork-local files are preserved (see FORK.md). CodeRabbit skips sync pull requests.
-
-Review, then `/approve` to merge. Merging triggers a release.
 EOF
   gh pr create --base main --head "$SYNC_BRANCH" --title "$title" --body-file /tmp/sync-pr-body.md
 fi
@@ -129,5 +140,3 @@ if [[ -n "$conflicts" ]]; then
     gh pr comment "$SYNC_BRANCH" --body "⚠️ Sync has conflicts in: ${conflicts}. Resolve the conflict markers in this pull request, then push a follow-up commit."
   fi
 fi
-
-echo "Done."

@@ -32,10 +32,10 @@ jobs:
 
       - name: Check for new upstream commits
         id: check
-        run: bash scripts/upstream-sync-check.sh
+        run: bash .github/scripts/upstream-sync-check.sh
 
       - name: Sync upstream
         if: steps.check.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
-        run: bash scripts/sync-upstream.sh
+        run: bash .github/scripts/sync-upstream.sh
