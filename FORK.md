@@ -5,46 +5,53 @@
 This repository is a fork of the Freebuff CLI. The Freebuff CLI is the
 Codebuff CLI compiled with the flag `FREEBUFF_MODE=true`.
 
-The fork provides a better Freebuff. It includes our own features and it
-includes upstream pull requests that the upstream team has not yet merged.
-
-The name plays on "Freebuff": buffed, and free.
+The fork adds features that are not in the upstream CLI. It can include
+upstream pull requests before the upstream team merges them.
 
 ## Relationship with upstream
 
 The upstream repository is a public mirror of a private source tree. The
-upstream team ports accepted public contributions into the private tree. They
-then export the tree back to the public mirror as "Sync public snapshot"
-commits.
+upstream team ports accepted public contributions into the private tree.
+The upstream team exports the tree back to the public mirror as "Sync public
+snapshot" commits.
 
 This fork tracks the upstream `main` branch. It adds our own changes on top.
-We also merge useful upstream pull requests that are still open.
+It can also include upstream pull requests that are still open.
 
 We send our changes back upstream as pull requests against the upstream
 repository.
 
-### Syncing from upstream
+### Upstream synchronization
 
-The workflow `sync-upstream.yml` keeps the fork up to date. It runs every
-15 minutes, after every push to `main`, and when triggered manually, and
-checks the upstream mirror for new commits. When it finds new commits, it
-opens or updates a pull request on the branch `sync/upstream`.
+A sync means upstream synchronization.
+The workflow is `sync-upstream.yml`.
+It runs every 15 minutes.
+It also runs after a push to `main`.
+A maintainer can start it manually.
+The workflow checks the upstream mirror for new commits.
+When it finds new commits, it opens or updates a pull request on
+`sync/upstream`.
 
-Merging a sync pull request triggers the workflow, because the merge pushes
-to `main`. The initial check finds that the marker matches upstream, so the
-sync step does not run.
+A merged sync pull request pushes to `main`.
+That push starts the workflow.
+The marker then matches the upstream commit.
+The workflow does not create another sync commit.
 
-The sync compares against a marker. The file `UPSTREAM_SHA` records the
-upstream commit the fork last examined. The file `UPSTREAM_VERSION` records
-the Freebuff version at that point. The sync reads it from the synced
-commit's `freebuff/cli/release/package.json`, so it matches the tree. The
-marker advances on every successful sync: when upstream changed only
-fork-local paths, the sync pushes a marker-only commit instead of a content
-sync, so the marker continues to identify the upstream commit last examined,
-and unchanged runs perform only the upstream check.
+The sync uses a marker.
+`UPSTREAM_SHA` records the upstream commit that the fork last examined.
+`UPSTREAM_VERSION` records the Freebuff version at that commit.
+The sync reads the version from `freebuff/cli/release/package.json` in the
+synced commit.
+The marker advances after every sync that finds new upstream commits.
+If upstream changes only excluded paths, the sync creates a marker-only
+commit.
+That commit records the upstream checkpoint.
+Without it, each run would examine the same upstream commits again.
+If no new upstream commit exists, the workflow performs only the upstream
+check.
 
-The sync preserves fork-local files. The sync does not import upstream
-changes to these paths:
+The sync preserves fork-local files.
+It does not import upstream changes to these paths:
 
 - `.github/`
 - `.coderabbit.yaml`
@@ -53,45 +60,85 @@ changes to these paths:
 - `release-please-config.json` and `.release-please-manifest.json`
 - `CHANGELOG.md`
 
-The sync manages `UPSTREAM_SHA` and `UPSTREAM_VERSION` itself. It rewrites
-both files when it advances the marker, so it never imports upstream
-changes to them.
+The sync manages `UPSTREAM_SHA` and `UPSTREAM_VERSION`.
+It rewrites both files when it advances the marker.
+It does not import upstream changes to these files.
 
-When upstream changes a file that the fork also changed, the sync applies
-with a three-way merge and leaves conflict markers in that file. The sync
-still opens or updates the pull request as a draft, with the conflicts
-visible in the diff and listed in one bot comment. The sync updates that
-comment in place on every run, so a later unrelated conflict updates the
-same comment instead of posting a second one. The `Conflict markers` check
-fails while any changed file contains unresolved markers. Resolve the
-markers and push a follow-up commit. The next sync run marks the pull
-request ready once it is clean.
+The sync applies a three-way merge when upstream and the fork changed the
+same file.
+Git leaves conflict markers when it cannot resolve the change.
+The sync opens or updates the pull request as a draft.
+The diff shows the conflict markers.
+One bot comment lists the conflicted files.
+The sync updates that comment on each run.
+It does not post a second comment for a later conflict.
+The `Conflict markers` check fails when a changed file contains unresolved
+markers.
+Resolve the markers and push a follow-up commit.
+The next sync marks the pull request ready when the files are clean.
 
-The sync uses the state label `upstream-conflict` to distinguish pull
-requests it drafted automatically because of conflicts from pull requests a
-maintainer drafted manually. The label is a prerequisite. Create it once
-with `gh label create upstream-conflict`. The sync fails loudly when the
-label is missing or when it cannot add or remove the label, so a conflicted
-pull request cannot be left as a draft silently.
+The sync updates a comment only when its first line is the exact conflict
+marker.
+The comment author must match the account authenticated by `SYNC_TOKEN`.
+The sync leaves other comments unchanged.
 
-The upstream sync script has automated integration tests
-(`.github/scripts/sync-upstream_test.sh`). They run in CI on every pull
-request and on every push to `main`. To run a subset, set `TESTS` to a
-space- or comma-separated list of test function names. Without it, the
-suite runs every test.
+The sync uses the state label `upstream-conflict`.
+The label identifies pull requests that the sync drafted because of
+conflicts.
+Create it once with `gh label create upstream-conflict`.
+The sync fails when the label is missing.
+It also fails when it cannot add or remove the label.
+A conflicted pull request cannot remain a draft without the label.
 
-The sync uses a plain fast-forward push. When `sync/upstream` already
-exists, the sync checks out its tip, applies only the upstream delta since
-that branch's own marker, and appends a new commit. Git rejects the push if
-the remote branch changes after the script fetches it, so manual commits on
-the branch are preserved; the pull request is updated in place. If the
-branch is up to date, the run is a no-op.
+Set `SYNC_CONFLICT_LABEL` only when the repository uses another label.
+The sync reads the label collection.
+It compares the label name as data.
+It rejects labels with commas or control characters.
 
-The sync needs the secret `SYNC_TOKEN` (a fine-grained token with Contents
-and Pull requests write access on this repository). Without it, the workflow
-fails when a sync is due.
+The sync script has integration tests in
+`.github/scripts/sync-upstream_test.sh`.
+The conflict-marker check has focused tests in
+`.github/scripts/check-conflict-markers_test.sh`.
+CI runs both suites on every pull request and every push to `main`.
+Set `TESTS` to a space- or comma-separated list of test function names to run
+a subset of the sync tests.
+The suite runs all tests when `TESTS` is not set.
 
-The root `README.md` is fork-specific. Preserve it across syncs from upstream.
+The sync test uses the standalone GitHub CLI fake
+`.github/scripts/test-support/gh-stub.py`. It models GraphQL node IDs and
+numeric REST comment IDs separately.
+
+The sync preserves `sync/upstream` only while its pull request is open.
+If the branch tip is already in `main`, the sync bases the local branch on
+current `main`.
+It uses a plain fast-forward push.
+This covers merge commits and fast-forward merges.
+
+If the branch tip is not in `main`, the sync reads the pull request state.
+It appends only to an open pull request.
+It preserves manual commits on that branch.
+If the pull request is merged, the sync bases the next branch on current
+`main`.
+It retires the old remote branch.
+It creates `sync/upstream` again after the new commit is ready.
+The sync does not force-push.
+
+If the pull request is closed, the sync fails before it reuses the branch.
+If the GitHub API cannot return the pull request state, the sync also fails.
+The sync leaves the remote branch unchanged in both cases.
+Reopen the pull request or remove the branch before the next sync.
+If the GitHub API cannot return the open pull-request list after the sync
+commit is pushed, the branch remains available.
+The next run retries the PR update.
+Git rejects the normal push if the remote branch changes after the fetch.
+If the branch is up to date, the run is a no-op.
+
+The sync needs the secret `SYNC_TOKEN`.
+The token needs Contents and Pull requests write access on this repository.
+The workflow fails when a sync is due and the token is absent.
+
+The root `README.md` is fork-specific.
+The sync preserves it.
 
 ## Licensing and builds
 
