@@ -475,6 +475,50 @@ test_check_script_tag_collision() {
   assert_equals "3" "$(wc -l < "$fixture_dir/check.out" | tr -d ' ')" "output has exactly three lines"
 }
 
+test_check_script_github_outputs() {
+  new_fixture "check-outputs"
+  marker=$(tr -d '[:space:]' < "$fixture_fork/UPSTREAM_SHA")
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+
+  # Up to date: the marker matches upstream, so changed=false.
+  if (
+    cd "$fixture_fork"
+    UPSTREAM_URL="$fixture_dir/upstream.git" \
+      GITHUB_OUTPUT="$fixture_dir/check.out" \
+      bash "$CHECKS_SCRIPT" >"$fixture_dir/check.log" 2>"$fixture_dir/check.err"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  check_out=$(cat "$fixture_dir/check.out")
+  assert_equals "0" "$status" "up-to-date check exits 0"
+  assert_contains "^changed=false$" "$check_out" "up-to-date reports changed=false"
+  assert_contains "^upstream_sha=${upstream_head}$" "$check_out" "up-to-date reports the upstream head"
+  assert_contains "^marker=${marker}$" "$check_out" "up-to-date reports the marker"
+
+  # New upstream commits: the check reports changed=true with the new head
+  # and keeps the old marker.
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  new_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+  if (
+    cd "$fixture_fork"
+    UPSTREAM_URL="$fixture_dir/upstream.git" \
+      GITHUB_OUTPUT="$fixture_dir/check.out" \
+      bash "$CHECKS_SCRIPT" >"$fixture_dir/check.log" 2>"$fixture_dir/check.err"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  check_out=$(cat "$fixture_dir/check.out")
+  assert_equals "0" "$status" "new-commits check exits 0"
+  assert_contains "^changed=true$" "$check_out" "new-commits reports changed=true"
+  assert_contains "^upstream_sha=${new_head}$" "$check_out" "new-commits reports the new head"
+  assert_contains "^marker=${marker}$" "$check_out" "new-commits keeps the old marker"
+}
+
 test_version_from_synced_tree() {
   new_fixture "version-from-tree"
   printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
@@ -1078,6 +1122,7 @@ run_all_tests() {
     test_upstream_branch_lookup_failure
     test_check_script_missing_branch
     test_check_script_tag_collision
+    test_check_script_github_outputs
     test_version_from_synced_tree
     test_filenames_with_spaces
     test_missing_token_in_ci_mode
