@@ -101,7 +101,13 @@ EOF
     gh pr edit "$SYNC_BRANCH" --title "$title"
   fi
 
-  is_draft=$(gh pr view "$SYNC_BRANCH" --json isDraft --jq '.isDraft' 2>/dev/null || echo false)
+  # The pull request exists here (created or already open), so a failed
+  # draft-state read must not be treated as "not a draft": that would drop
+  # the label from a still-drafted pull request. Fail loudly instead.
+  if ! is_draft=$(gh pr view "$SYNC_BRANCH" --json isDraft --jq '.isDraft' 2>/dev/null); then
+    echo "::error::could not read draft state for $SYNC_BRANCH" >&2
+    exit 1
+  fi
 
   if branch_has_conflicts "$ref"; then
     # Keep the pull request drafted and labelled while conflicts remain.
