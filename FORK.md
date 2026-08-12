@@ -55,10 +55,12 @@ conflicted sync cannot be merged by accident. Resolve the markers in the
 pull request and push a follow-up commit; the next sync run marks it ready
 once it is clean.
 
-The sync never overwrites manual changes on the `sync/upstream` branch. If
-the branch has a commit that the bot did not create, the sync pauses and
-waits for the pull request to merge; the marker advances on merge, so the
-next sync resumes from there.
+The sync never force-pushes. When `sync/upstream` already exists, the sync
+checks out its tip, applies only the upstream delta since that branch's own
+marker, and appends a new commit with a plain fast-forward push. A plain
+push cannot overwrite the remote tip, so manual commits on the branch are
+preserved by construction; the pull request is updated in place. If the
+branch is up to date, the run is a no-op.
 
 The sync needs the secret `SYNC_TOKEN` (a fine-grained token with Contents
 and Pull requests write access on this repository). Without it, the workflow
