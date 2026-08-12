@@ -129,7 +129,11 @@ if [[ "$upstream_sha" == "$marker" ]]; then
   echo "Up to date (marker ${marker:0:8})"
   if [[ -n "$remote_tip" ]]; then
     sync_draft_state "origin/$SYNC_BRANCH"
-    if ! gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
+    # After a sync merge the branch has no commits ahead of main, so a new
+    # pull request would be empty. Only recreate it when the branch is ahead.
+    ahead_count=$(git rev-list --count "main..origin/$SYNC_BRANCH")
+    if [[ "$ahead_count" -gt 0 ]] &&
+      ! gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
       version=$(tr -d '[:space:]' < UPSTREAM_VERSION 2>/dev/null || echo "unknown")
       cat > "$body_file" <<'EOF'
 Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).

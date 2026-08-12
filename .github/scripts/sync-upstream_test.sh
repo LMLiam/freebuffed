@@ -607,6 +607,31 @@ test_closed_pr_with_live_branch() {
   assert_equals "2" "$(grep -c 'chore(upstream)' <<< "$(branch_log)")" "two sync commits appended"
 }
 
+test_merged_pr_not_recreated() {
+  new_fixture "merged-pr"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # Simulate a merged PR: main fast-forwards to the sync branch tip and the
+  # PR state is MERGED. The branch has no commits ahead of main, so the sync
+  # must not recreate the pull request.
+  git -C "$fixture_fork" fetch -q origin
+  git -C "$fixture_fork" switch -q -C main origin/main
+  git -C "$fixture_fork" merge -q --ff-only origin/sync/upstream
+  git -C "$fixture_fork" push -q origin main
+  reset_gh
+  GH_STUB_STATE=MERGED
+
+  run_sync
+  assert_equals "0" "$status" "no-op after merge exits 0"
+  assert_contains "Up to date" "$(sync_out)" "reports up to date"
+  gh_actions=$(gh_log)
+  assert_not_contains "pr create" "$gh_actions" "no PR recreated after merge"
+  assert_not_contains "pr ready" "$gh_actions" "no draft toggling after merge"
+}
+
 test_gh_create_failure_aborts() {
   new_fixture "gh-create-fail"
   echo "upstream file" > "$fixture_upstream/b.txt"
@@ -702,6 +727,7 @@ run_all_tests() {
     test_missing_and_invalid_branch_marker
     test_remote_advance_rejects_push
     test_closed_pr_with_live_branch
+    test_merged_pr_not_recreated
     test_gh_create_failure_aborts
     test_gh_edit_failure_aborts
     test_draft_state_failures_tolerated
