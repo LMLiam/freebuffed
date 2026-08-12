@@ -17,6 +17,10 @@
 # the conflicts visible. Resolve the markers in the pull request and push a
 # follow-up commit.
 #
+# The marker always advances, even when upstream changed only fork-local paths:
+# that run pushes a marker-only commit so the marker keeps meaning "the
+# upstream commit last examined" and no-op runs stay cheap.
+#
 # Usage:
 #   bash .github/scripts/sync-upstream.sh
 set -euo pipefail
@@ -110,21 +114,21 @@ if [[ -z "$remote_tip" ]]; then
 fi
 
 git diff --full-index "$marker" "$upstream_sha" -- . "${EXCLUDES[@]}" > "$PATCH_FILE"
-if [[ ! -s "$PATCH_FILE" ]]; then
-  echo "No upstream changes outside the fork-local paths"
-  exit 0
-fi
 
 conflicts=""
-if git apply --3way "$PATCH_FILE"; then
-  echo "Applied cleanly."
-else
-  conflicts=$(git grep -l '^<<<<<<< ' -- . 2>/dev/null | tr '\n' ' ' || true)
-  if [[ -z "$conflicts" ]]; then
-    echo "::error::Upstream changes could not be applied (no three-way merge available). Inspect ${PATCH_FILE}." >&2
-    exit 1
+if [[ -s "$PATCH_FILE" ]]; then
+  if git apply --3way "$PATCH_FILE"; then
+    echo "Applied cleanly."
+  else
+    conflicts=$(git grep -l '^<<<<<<< ' -- . 2>/dev/null | tr '\n' ' ' || true)
+    if [[ -z "$conflicts" ]]; then
+      echo "::error::Upstream changes could not be applied (no three-way merge available). Inspect ${PATCH_FILE}." >&2
+      exit 1
+    fi
+    echo "Applied with conflicts in: ${conflicts}"
   fi
-  echo "Applied with conflicts in: ${conflicts}"
+else
+  echo "Upstream changed only fork-local paths — advancing the marker only."
 fi
 
 # Advance the markers.

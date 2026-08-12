@@ -33,8 +33,11 @@ marker advances with the sync, so the immediate check after a sync merge is a
 no-op.
 
 The sync compares against a marker. The file `UPSTREAM_SHA` records the
-upstream commit that the fork last synced. The file `UPSTREAM_VERSION`
-records the Freebuff version at that point. The sync updates both files.
+upstream commit the fork last examined. The file `UPSTREAM_VERSION` records
+the Freebuff version at that point. The marker always advances: when
+upstream changed only fork-local paths, the sync pushes a marker-only commit
+instead of a content sync, so the marker keeps its meaning and no-op runs
+stay cheap.
 
 The sync preserves fork-local files. A sync never touches these paths:
 
