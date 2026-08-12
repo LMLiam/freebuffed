@@ -63,23 +63,4 @@ jobs:
       - name: Fail on unresolved conflict markers in changed files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          found=""
-          count=0
-          while IFS= read -r -d '' file; do
-            count=$((count + 1))
-            if hits=$(grep -nI -E '^(<<<<<<< |>>>>>>> )' "$file" 2>/dev/null); then
-              found+="${file}:${hits}"$'\n'
-            fi
-          done < <(git diff --name-only -z --diff-filter=ACMR "$BASE_SHA"...HEAD)
-          if [[ "$count" -eq 0 ]]; then
-            echo "No changed files."
-            exit 0
-          fi
-          if [[ -n "$found" ]]; then
-            echo "::error::Unresolved conflict markers in changed files:"
-            printf '%s' "$found"
-            exit 1
-          fi
-          echo "No conflict markers in changed files."
+        run: bash .github/scripts/check-conflict-markers.sh "$BASE_SHA" HEAD
