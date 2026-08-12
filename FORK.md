@@ -23,6 +23,36 @@ We also merge useful upstream pull requests that are still open.
 We send our changes back upstream as pull requests against the upstream
 repository.
 
+### Syncing from upstream
+
+The workflow `sync-upstream.yml` keeps the fork up to date. It runs every 15
+minutes and checks the upstream mirror for new commits. When it finds new
+commits, it opens or updates a pull request on the branch `sync/upstream`.
+
+The sync compares against a marker. The file `UPSTREAM_SHA` records the
+upstream commit that the fork last synced. The file `UPSTREAM_VERSION`
+records the Freebuff version at that point. The sync updates both files.
+
+The sync preserves fork-local files. A sync never touches these paths:
+
+- `.github/`
+- `.coderabbit.yaml`
+- `FORK.md`
+- `README.md` and `README.zh-CN.md`
+- `UPSTREAM_VERSION` and `UPSTREAM_SHA`
+- `release-please-config.json` and `.release-please-manifest.json`
+- `CHANGELOG.md`
+- `scripts/sync-upstream.sh`
+
+When upstream changes a file that the fork also changed, the sync cannot
+apply automatically. The workflow stops and reports the conflict. Resolve it
+manually with `bash scripts/sync-upstream.sh`, then push to `sync/upstream`.
+The pull request then shows the resolved result.
+
+The sync needs the secret `SYNC_TOKEN` (a fine-grained token with Contents
+and Pull requests write access on this repository). Without it, the workflow
+fails when a sync is due.
+
 The root `README.md` is fork-specific. Preserve it across syncs from upstream.
 
 ## Licensing and builds

@@ -1,0 +1,117 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://github.com/CodebuffAI/freebuff.git
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: sync/upstream
+  GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+
+jobs:
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          upstream_sha=$(git ls-remote "$UPSTREAM_URL" "$UPSTREAM_BRANCH" | awk '{print $1}')
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+          marker=$(gh api repos/LMLiam/freebuffed/contents/UPSTREAM_SHA --jq '.content' | base64 -d | tr -d '[:space:]')
+          echo "marker=${marker}" >> "$GITHUB_OUTPUT"
+          if [[ -z "$marker" ]]; then
+            echo "::error::UPSTREAM_SHA is missing on main. Bootstrap it and re-run."
+            exit 1
+          fi
+          if [[ "$upstream_sha" == "$marker" ]]; then
+            echo "Up to date (marker ${marker:0:8})"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New upstream commits: ${marker:0:8} -> ${upstream_sha:0:8}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.check.outputs.changed == 'true'
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Apply upstream changes
+        id: apply
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          marker="${{ steps.check.outputs.marker }}"
+          upstream_sha="${{ steps.check.outputs.upstream_sha }}"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --filter=blob:none --no-tags upstream "$UPSTREAM_BRANCH"
+          # Diff since the last sync, excluding fork-local paths (see FORK.md).
+          git diff "$marker" "upstream/$UPSTREAM_BRANCH" -- . \
+            ':(exclude).github' \
+            ':(exclude).coderabbit.yaml' \
+            ':(exclude)FORK.md' \
+            ':(exclude)README.md' \
+            ':(exclude)README.zh-CN.md' \
+            ':(exclude)UPSTREAM_VERSION' \
+            ':(exclude)UPSTREAM_SHA' \
+            ':(exclude)release-please-config.json' \
+            ':(exclude).release-please-manifest.json' \
+            ':(exclude)CHANGELOG.md' \
+            ':(exclude)scripts/sync-upstream.sh' \
+            > /tmp/upstream-sync.patch
+          if [[ ! -s /tmp/upstream-sync.patch ]]; then
+            echo "No upstream changes outside the fork-local paths"
+            exit 0
+          fi
+          # Empty npm_version marks the empty-patch case for the PR step.
+          git switch -c "$SYNC_BRANCH"
+          if ! git apply --check /tmp/upstream-sync.patch; then
+            echo "::error::Upstream changes conflict with fork changes. Resolve manually: bash scripts/sync-upstream.sh, then push to $SYNC_BRANCH."
+            exit 1
+          fi
+          git apply /tmp/upstream-sync.patch
+          echo "$upstream_sha" > UPSTREAM_SHA
+          npm_version=$(curl -s https://registry.npmjs.org/freebuff/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          echo "$npm_version" > UPSTREAM_VERSION
+          git add -A
+          git -c user.name="freebuffed[bot]" -c user.email="freebuffed[bot]@users.noreply.github.com" \
+            commit -m "chore(upstream): sync freebuff ${npm_version}"
+          git push --force-with-lease origin "$SYNC_BRANCH"
+          echo "npm_version=${npm_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the sync pull request
+        if: steps.check.outputs.changed == 'true' && steps.apply.outputs.npm_version != ''
+        run: |
+          set -euo pipefail
+          npm_version="${{ steps.apply.outputs.npm_version }}"
+          title="chore(upstream): sync freebuff ${npm_version}"
+          if gh pr view "$SYNC_BRANCH" --json number --jq '.number' >/dev/null 2>&1; then
+            echo "Pull request already open; branch updated."
+          else
+            cat > /tmp/sync-pr-body.md <<'EOF'
+            Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
+
+            Brings the upstream commits since the last sync. Fork-local files are preserved (see FORK.md). CodeRabbit skips sync pull requests.
+
+            Review, then `/approve` to merge. Merging triggers a release.
+          EOF
+            gh pr create \
+              --base main \
+              --head "$SYNC_BRANCH" \
+              --title "$title" \
+              --body-file /tmp/sync-pr-body.md
+          fi
