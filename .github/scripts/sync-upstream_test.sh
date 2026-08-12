@@ -92,31 +92,41 @@ cat > "$TEST_ROOT/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 LOG="${GH_STUB_LOG:?gh stub needs GH_STUB_LOG}"
 printf 'gh %s\n' "$*" >> "$LOG"
-case "${1:-} ${2:-}" in
-  "pr view")
-    # Emulate gh pr view --json <fields> --jq <expr> for the queries the
-    # sync script uses: state, isDraft, labels, comments.
-    case "$*" in
-      *"--json labels"*) printf '%s\n' "${GH_STUB_LABELS:-}" ;;
-      *"--json isDraft"*) printf '%s\n' "${GH_STUB_DRAFT:-false}" ;;
-      *"--json comments"*) printf '%s\n' "${GH_STUB_COMMENTS:-}" ;;
-      *"--json state"*) printf '%s\n' "${GH_STUB_STATE:-CLOSED}" ;;
-      *) printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}" ;;
-    esac
-    ;;
-esac
 # Simulate a gh failure. GH_STUB_FAIL is a comma-separated list of globs.
-# When the full command line matches one, exit non-zero after logging.
+# When the full command line matches one, exit non-zero after logging and
+# before printing any output, like a real failed gh call.
 # Note: capture "$*" before changing IFS, which controls how "$*" joins args.
 if [[ -n "${GH_STUB_FAIL:-}" ]]; then
   cmd_line="$*"
+  saved_ifs=$IFS
   IFS=,
   for fail_pat in $GH_STUB_FAIL; do
     if [[ -n "$fail_pat" && "$cmd_line" == $fail_pat ]]; then
       exit 1
     fi
   done
+  IFS=$saved_ifs
 fi
+case "${1:-}" in
+  "pr")
+    # Emulate gh pr view --json <fields> --jq <expr> for the queries the
+    # sync script uses: state, isDraft, labels, comments. Other pr
+    # subcommands print nothing, like real gh writing JSON only to the log.
+    if [[ "${2:-}" == "view" ]]; then
+      case "$*" in
+        *"--json labels"*) printf '%s\n' "${GH_STUB_LABELS:-}" ;;
+        *"--json isDraft"*) printf '%s\n' "${GH_STUB_DRAFT:-false}" ;;
+        *"--json comments"*) printf '%s\n' "${GH_STUB_COMMENTS:-}" ;;
+        *"--json state"*) printf '%s\n' "${GH_STUB_STATE:-CLOSED}" ;;
+        *) printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}" ;;
+      esac
+    fi
+    ;;
+  "api")
+    # Emulate the HTTP status line gh api --include prints on success.
+    printf 'HTTP/2 %s\n' "${GH_STUB_HTTP_STATUS:-200}"
+    ;;
+esac
 exit 0
 EOF
 chmod +x "$TEST_ROOT/bin/gh"
@@ -245,7 +255,9 @@ reset_gh() {
   GH_STUB_STATE=CLOSED
   GH_STUB_LABELS=''
   export GH_STUB_DRAFT=false
+  export GH_STUB_COMMENTS=''
   unset GH_STUB_FAIL
+  unset GH_STUB_HTTP_STATUS
 }
 
 test_already_up_to_date() {
@@ -420,6 +432,29 @@ test_check_script_missing_branch() {
   assert_contains "not found" "$(cat "$fixture_dir/check.err")" "missing branch reported"
 }
 
+test_check_script_tag_collision() {
+  new_fixture "check-tag-collision"
+  # A tag named exactly like the branch must not make the check read two
+  # refs: the branch head only, on one line.
+  git -C "$fixture_upstream" tag main
+  git -C "$fixture_upstream" push -q origin refs/heads/main:refs/heads/main refs/tags/main:refs/tags/main
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+
+  if (
+    cd "$fixture_fork"
+    UPSTREAM_URL="$fixture_dir/upstream.git" \
+      GITHUB_OUTPUT="$fixture_dir/check.out" \
+      bash "$CHECKS_SCRIPT" >"$fixture_dir/check.log" 2>"$fixture_dir/check.err"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  assert_equals "0" "$status" "check exits 0 with a tag named like the branch"
+  assert_contains "^upstream_sha=${upstream_head}$" "$(cat "$fixture_dir/check.out")" "branch head only, single line"
+  assert_equals "3" "$(wc -l < "$fixture_dir/check.out" | tr -d ' ')" "output has exactly three lines"
+}
+
 test_version_from_synced_tree() {
   new_fixture "version-from-tree"
   printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
@@ -472,6 +507,26 @@ test_open_pr_title_advances() {
   gh_actions=$(gh_log)
   assert_contains 'pr edit sync/upstream --title chore\(upstream\): sync freebuff 0\.0\.147' "$gh_actions" "PR title advanced to 0.0.147"
   assert_not_contains "pr create" "$gh_actions" "PR reused, not recreated"
+}
+
+test_title_fallback_to_unknown() {
+  new_fixture "unknown-version"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # Remove the branch's version marker; the no-op run must fall back to
+  # "unknown" in the title instead of writing a trailing-space title.
+  switch_to_sync_branch
+  git -C "$fixture_fork" rm -q UPSTREAM_VERSION
+  commit_on_sync_branch "chore: drop version marker"
+  reset_gh
+  GH_STUB_STATE=OPEN
+
+  run_sync
+  assert_equals "0" "$status" "no-op run exits 0"
+  assert_contains 'pr edit sync/upstream --title chore\(upstream\): sync freebuff unknown' "$(gh_log)" "title falls back to unknown"
 }
 
 test_manual_draft_left_alone() {
@@ -818,17 +873,74 @@ test_comment_failure_reconciled() {
   run_sync
   assert_equals "0" "$status" "recovery run exits 0"
   assert_contains "pr comment" "$(gh_log)" "conflict notice posted on retry"
+
+  # An existing notice must not be posted twice: the de-duplication check
+  # reads the comments and skips when the notice is already present.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  export GH_STUB_COMMENTS='⚠️ Sync has conflicts in: a.txt.'
+  run_sync
+  unset GH_STUB_COMMENTS
+  assert_equals "0" "$status" "duplicate-notice run exits 0"
+  assert_not_contains "pr comment" "$(gh_log)" "existing conflict notice not duplicated"
+}
+
+test_state_read_failure_reconciled() {
+  new_fixture "state-read-recovery"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # A failed state read on a live branch must not be read as "not OPEN":
+  # the reconcile still runs and the create path fails loudly if a pull
+  # request exists.
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  export GH_STUB_FAIL='pr view sync/upstream --json state*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_equals "0" "$status" "state read failure does not skip reconciliation"
+  assert_contains "pr create" "$(gh_log)" "reconcile runs after state read failure"
 }
 
 test_missing_conflict_label_fails() {
   new_fixture "missing-label"
+  export GH_STUB_HTTP_STATUS=404
+
+  run_sync
+  unset GH_STUB_HTTP_STATUS
+  assert_status_failed "missing label fails the sync"
+  assert_contains "does not exist" "$(sync_err)" "missing label reported"
+  assert_not_contains "could not read label" "$(sync_err)" "404 not reported as an API failure"
+  assert_no_branch "no branch created"
+}
+
+test_conflict_label_api_failure_fails() {
+  new_fixture "label-api-failure"
+  export GH_STUB_HTTP_STATUS=500
+
+  run_sync
+  unset GH_STUB_HTTP_STATUS
+  assert_status_failed "label API failure fails the sync"
+  assert_contains "could not read label" "$(sync_err)" "API failure reported distinctly"
+  assert_not_contains "does not exist" "$(sync_err)" "API failure not reported as missing label"
+  assert_no_branch "no branch created"
+
+  # A failed call (network error, rate limit) with no status line reports the
+  # call failure, not a missing label.
+  new_fixture "label-api-call-failure"
   export GH_STUB_FAIL='api repos/LMLiam/freebuffed/labels/*'
 
   run_sync
   unset GH_STUB_FAIL
-  assert_status_failed "missing label fails the sync"
-  assert_contains "does not exist" "$(sync_err)" "missing label reported"
-  assert_no_branch "no branch created"
+  assert_status_failed "label API call failure fails the sync"
+  assert_contains "API call failed" "$(sync_err)" "failed API call reported"
+  assert_not_contains "does not exist" "$(sync_err)" "call failure not reported as missing label"
 }
 
 test_conflict_label_failure_aborts() {
@@ -883,6 +995,7 @@ run_all_tests() {
     test_missing_and_invalid_marker
     test_upstream_branch_lookup_failure
     test_check_script_missing_branch
+    test_check_script_tag_collision
     test_version_from_synced_tree
     test_filenames_with_spaces
     test_missing_token_in_ci_mode
@@ -898,11 +1011,14 @@ run_all_tests() {
     test_gh_create_failure_aborts
     test_gh_edit_failure_aborts
     test_title_reconciled_after_failure
+    test_title_fallback_to_unknown
     test_label_failure_reconciled
     test_ready_failure_reconciled
     test_labels_read_failure_aborts
+    test_state_read_failure_reconciled
     test_comment_failure_reconciled
     test_missing_conflict_label_fails
+    test_conflict_label_api_failure_fails
     test_conflict_label_failure_aborts
     test_missing_version_file_fails
     test_invalid_version_json_fails

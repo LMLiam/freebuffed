@@ -60,10 +60,25 @@ branch_has_conflicts() {
 }
 
 ensure_conflict_label() {
-  if ! gh api "repos/$REPO/labels/$CONFLICT_LABEL" >/dev/null 2>&1; then
-    echo "::error::label '$CONFLICT_LABEL' does not exist. Create it once with: gh label create \"$CONFLICT_LABEL\" --color d73a4a --description 'Sync pull request has unresolved conflict markers'" >&2
+  local code
+  # Distinguish a missing label (404) from an API failure such as a network
+  # error, rate limit, or missing permission: only a confirmed 404 gets the
+  # create hint, and any other failure aborts with its own message.
+  if ! code=$(gh api "repos/$REPO/labels/$CONFLICT_LABEL" --silent --include 2>/dev/null | awk 'NR==1{print $2}'); then
+    echo "::error::could not read label '$CONFLICT_LABEL' (API call failed)" >&2
     exit 1
   fi
+  case "$code" in
+    200) return 0 ;;
+    404)
+      echo "::error::label '$CONFLICT_LABEL' does not exist. Create it once with: gh label create \"$CONFLICT_LABEL\" --color d73a4a --description 'Sync pull request has unresolved conflict markers'" >&2
+      exit 1
+      ;;
+    *)
+      echo "::error::could not read label '$CONFLICT_LABEL' (status ${code:-unknown})" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # Reconcile the sync pull request towards its desired state. Both the changed
@@ -72,10 +87,23 @@ ensure_conflict_label() {
 # the branch itself, so a stale title is repaired even when main lags.
 reconcile_pr() {
   local ref="$1"
-  local version title state is_draft pr_labels
-  version=$(git show "$ref:UPSTREAM_VERSION" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+  local version title state is_draft pr_labels comments
+  # Capture the version before stripping whitespace, so a failed read falls
+  # back to "unknown" instead of producing an empty version.
+  version=$(git show "$ref:UPSTREAM_VERSION" 2>/dev/null || true)
+  version=$(printf '%s' "$version" | tr -d '[:space:]')
+  version="${version:-unknown}"
   title="chore(upstream): sync freebuff ${version}"
-  state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null || true)
+
+  # A missing pull request is normal when the branch is live (it is created
+  # below). A final branch with no commits ahead of main has nothing to
+  # reconcile. Any other read failure must not be read as "not OPEN": route
+  # it to the create path, which fails loudly when a pull request exists.
+  if ! state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null); then
+    if [[ "$(git rev-list --count "main..$ref")" -eq 0 ]]; then
+      return 0
+    fi
+  fi
 
   # A merged or closed pull request whose branch has no commits ahead of main
   # is final; do not recreate it.
@@ -115,7 +143,14 @@ EOF
       gh pr ready --undo "$SYNC_BRANCH"
     fi
     gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
-    if ! gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "Sync has conflicts"; then
+    # Read the comments loudly: a failed read must not be treated as "no
+    # notice", which would repost the comment on every run until the API
+    # recovers.
+    if ! comments=$(gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null); then
+      echo "::error::could not read comments for $SYNC_BRANCH" >&2
+      exit 1
+    fi
+    if ! grep -q "Sync has conflicts" <<< "$comments"; then
       gh pr comment "$SYNC_BRANCH" --body \
         "⚠️ Sync has conflicts in: $(conflicted_files "$ref" | tr '\n' ' '). The pull request is a draft and stays a draft until the conflicts are resolved."
     fi

@@ -13,7 +13,10 @@ set -euo pipefail
 UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/CodebuffAI/freebuff.git}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 
-upstream_sha=$(git ls-remote "$UPSTREAM_URL" "$UPSTREAM_BRANCH" | awk '{print $1}')
+# Match the branch head ref explicitly. An unscoped pattern would also
+# match a tag named like the branch, which would make upstream_sha
+# multi-line and corrupt both the marker comparison and GITHUB_OUTPUT.
+upstream_sha=$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | awk 'NR==1{print $1}')
 if [[ -z "$upstream_sha" ]]; then
   echo "::error::$UPSTREAM_BRANCH not found at $UPSTREAM_URL." >&2
   exit 1
