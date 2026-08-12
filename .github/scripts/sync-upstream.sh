@@ -87,6 +87,13 @@ else
   marker="$main_marker"
 fi
 
+# The marker must name a commit in the fetched upstream history, otherwise the
+# diff below would fail cryptically.
+if ! git cat-file -e "$marker^{commit}" 2>/dev/null; then
+  echo "error: marker ${marker:0:12} is not a commit in the fetched upstream history — check UPSTREAM_SHA" >&2
+  exit 1
+fi
+
 if [[ "$upstream_sha" == "$marker" ]]; then
   echo "Up to date (marker ${marker:0:8})"
   if [[ -n "$remote_tip" ]]; then

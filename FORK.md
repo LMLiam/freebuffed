@@ -59,6 +59,10 @@ conflicted sync cannot be merged by accident. Resolve the markers in the
 pull request and push a follow-up commit; the next sync run marks it ready
 once it is clean.
 
+The sync machinery is covered by an automated test suite
+(`.github/scripts/test-sync-upstream.sh`) that exercises the script against
+throwaway local git repositories. It runs in CI on every pull request.
+
 The sync never force-pushes. When `sync/upstream` already exists, the sync
 checks out its tip, applies only the upstream delta since that branch's own
 marker, and appends a new commit with a plain fast-forward push. A plain

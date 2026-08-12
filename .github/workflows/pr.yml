@@ -88,3 +88,16 @@ jobs:
             exit 1
           fi
           echo "No conflict markers in changed files."
+
+  sync-machinery-tests:
+    name: Sync machinery tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The upstream sync script force-updates a persistent branch, so it is
+      # exercised against throwaway local git repositories (no network).
+      - name: Run sync machinery tests
+        run: bash .github/scripts/test-sync-upstream.sh
