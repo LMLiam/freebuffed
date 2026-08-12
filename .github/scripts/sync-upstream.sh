@@ -43,6 +43,11 @@ EXCLUDES=(
 
 cd "$(git rev-parse --show-toplevel)"
 
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+PATCH_FILE="$TMP_DIR/upstream-sync.patch"
+BODY_FILE="$TMP_DIR/sync-pr-body.md"
+
 branch=$(git branch --show-current)
 if [[ "$branch" != "main" ]]; then
   echo "error: run from main (currently on $branch)" >&2
@@ -90,10 +95,10 @@ if [[ "$upstream_sha" == "$marker" ]]; then
     fi
     if ! gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
       version=$(tr -d '[:space:]' < UPSTREAM_VERSION 2>/dev/null || echo "unknown")
-      cat > /tmp/sync-pr-body.md <<'EOF'
+      cat > "$BODY_FILE" <<'EOF'
 Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
 EOF
-      gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${version}" --body-file /tmp/sync-pr-body.md
+      gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${version}" --body-file "$BODY_FILE"
     fi
   fi
   exit 0
@@ -104,19 +109,19 @@ if [[ -z "$remote_tip" ]]; then
   git switch -c "$SYNC_BRANCH"
 fi
 
-git diff --full-index "$marker" "$upstream_sha" -- . "${EXCLUDES[@]}" > /tmp/upstream-sync.patch
-if [[ ! -s /tmp/upstream-sync.patch ]]; then
+git diff --full-index "$marker" "$upstream_sha" -- . "${EXCLUDES[@]}" > "$PATCH_FILE"
+if [[ ! -s "$PATCH_FILE" ]]; then
   echo "No upstream changes outside the fork-local paths"
   exit 0
 fi
 
 conflicts=""
-if git apply --3way /tmp/upstream-sync.patch; then
+if git apply --3way "$PATCH_FILE"; then
   echo "Applied cleanly."
 else
   conflicts=$(git grep -l '^<<<<<<< ' -- . 2>/dev/null | tr '\n' ' ' || true)
   if [[ -z "$conflicts" ]]; then
-    echo "::error::Upstream changes could not be applied (no three-way merge available). Inspect /tmp/upstream-sync.patch." >&2
+    echo "::error::Upstream changes could not be applied (no three-way merge available). Inspect ${PATCH_FILE}." >&2
     exit 1
   fi
   echo "Applied with conflicts in: ${conflicts}"
@@ -131,24 +136,26 @@ git add -A
 git -c user.name="$COMMIT_NAME" -c user.email="$COMMIT_EMAIL" \
   commit -m "chore(upstream): sync freebuff ${npm_version}"
 
-# Push. In CI the push uses SYNC_TOKEN; locally it uses your origin.
-# A plain push only fast-forwards — it can never overwrite the remote tip.
+# Push. In CI the push uses SYNC_TOKEN, passed as an ephemeral credential to
+# this one command — nothing is written to the repository's git config. A
+# plain push only fast-forwards — it can never overwrite the remote tip.
 if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   if [[ -z "${GH_TOKEN:-}" ]]; then
     echo "::error::GH_TOKEN is empty — add the SYNC_TOKEN secret to the repository." >&2
     exit 1
   fi
-  git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+  git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$SYNC_BRANCH"
+else
+  git push origin "$SYNC_BRANCH"
 fi
-git push origin "$SYNC_BRANCH"
 
 if gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
   echo "Pull request already open; branch updated."
 else
-  cat > /tmp/sync-pr-body.md <<'EOF'
+  cat > "$BODY_FILE" <<'EOF'
 Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
 EOF
-  gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${npm_version}" --body-file /tmp/sync-pr-body.md
+  gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${npm_version}" --body-file "$BODY_FILE"
 fi
 
 if [[ -n "$conflicts" ]]; then

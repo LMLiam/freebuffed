@@ -59,6 +59,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
       # Committed conflict markers are not a git conflict, so GitHub still
       # treats the pull request as mergeable. Fail instead if any changed
       # file contains unresolved markers.
@@ -67,17 +68,20 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD)
-          if [[ -z "$changed" ]]; then
-            echo "No changed files."
-            exit 0
-          fi
+          # Consume the diff stream directly, NUL-delimited, so filenames
+          # containing newlines survive the scan.
           found=""
-          while IFS= read -r file; do
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
             if hits=$(grep -nI -E '^(<<<<<<< |>>>>>>> )' "$file" 2>/dev/null); then
               found+="${file}:${hits}"$'\n'
             fi
-          done <<< "$changed"
+          done < <(git diff --name-only -z --diff-filter=ACMR "$BASE_SHA"...HEAD)
+          if [[ "$count" -eq 0 ]]; then
+            echo "No changed files."
+            exit 0
+          fi
           if [[ -n "$found" ]]; then
             echo "::error::Unresolved conflict markers in changed files:"
             printf '%s' "$found"
