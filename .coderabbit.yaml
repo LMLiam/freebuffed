@@ -1,0 +1,168 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+tone_instructions: "Be concise, direct, and findings-first. Prioritize correctness, maintainability, and actionable evidence over praise."
+early_access: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - "FORK.md"
+
+reviews:
+  profile: "assertive"
+  high_level_summary_instructions: |
+    Summarize the PR for maintainers with emphasis on user-visible CLI behavior,
+    package boundaries (cli/common/sdk/agents), test coverage, release impact,
+    and any risk to the upstream sync.
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  review_details: true
+  commit_status: true
+  fail_commit_status: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: false
+  auto_apply_labels: false
+  poem: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    ignore_title_keywords:
+      - "chore(main): release"
+      - "chore: release"
+      - "release-please"
+      - "Release Please"
+      - "autorelease"
+      - "chore(upstream):"
+    ignore_usernames:
+      - "github-actions[bot]"
+      - "release-please[bot]"
+      - "google-github-actions[bot]"
+
+  path_instructions:
+    - path: "cli/**"
+      instructions: |
+        Review CLI code against the repository conventions:
+        - Prefer small, focused files; flag broad helper modules, god objects, and speculative abstractions.
+        - Check for explicit types, no leaked mutable state, and errors that surface real failures to the user.
+        - The TUI must stay responsive; flag anything that blocks on network or subprocess work on the main loop.
+    - path: "common/**"
+      instructions: |
+        Review shared code carefully:
+        - Preserve backward compatibility of the public surface; common is consumed by multiple packages.
+        - Flag type drift and changes that break the zod schema contracts.
+    - path: "sdk/**"
+      instructions: |
+        Review SDK code for API stability:
+        - Public API changes are user-visible; require explicit rationale and documentation.
+        - Flag breaking changes to exported types and functions.
+    - path: "agents/**"
+      instructions: |
+        Review agent definitions and runtime changes:
+        - Flag agents that load files the public mirror does not ship.
+        - Verify changes do not depend on closed-source desktop or web-app code.
+    - path: "agents-graveyard/**"
+      instructions: |
+        Files here are test fixtures only. They must not be loaded as agents.
+        Review them only when their deletion or movement breaks a test import.
+    - path: "test/**"
+      instructions: |
+        Review tests as first-class deliverables:
+        - Require focused coverage for each behavioral branch, edge case, and invalid input introduced by the PR.
+        - Flag tests that assert only serialized strings when structural assertions would better protect behavior.
+        - Flag tests that read closed-source product paths (desktop app source, private web app); the mirror does not ship them.
+    - path: "docs/**"
+      instructions: |
+        Review documentation for accuracy against the implemented code:
+        - Keep prose concise and concrete; avoid claims not backed by implemented code.
+        - Match the ASD-STE100 style used in FORK.md.
+    - path: ".github/workflows/**"
+      instructions: |
+        Review GitHub Actions changes for least privilege:
+        - Require pinned third-party actions (full commit SHA) unless there is a documented reason.
+        - Flag broad token permissions and unscoped secrets.
+        - Keep release-please and release workflows consistent with the manifest and UPSTREAM_VERSION.
+    - path: "release-please-config.json"
+      instructions: |
+        Review release-please configuration conservatively:
+        - Preserve the conventional commit and changelog behavior.
+        - Flag changes that would break the release manifest or version scheme.
+    - path: ".release-please-manifest.json"
+      instructions: |
+        Treat manifest-only changes as release bookkeeping:
+        - Verify the version is intentional and consistent with the generated release PR.
+    - path: "UPSTREAM_VERSION"
+      instructions: |
+        Treat as release bookkeeping:
+        - It records the Freebuff npm version the current snapshot is based on.
+        - It should only change as part of an upstream sync.
+    - path: "FORK.md"
+      instructions: |
+        Review for the repository style:
+        - Match ASD-STE100 British English; keep prose concise.
+        - Do not request changes that contradict the documented upstream relationship.
+
+  pre_merge_checks:
+    title:
+      mode: "error"
+      requirements: "PR titles must match the repository convention `verb(area): something`, with a lowercase verb and area (for example `feat(cli): add /mcp command`)."
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "warning"
+    docstrings:
+      mode: "off"
+    custom_checks:
+      - name: "Conventional commit compliance"
+        mode: "warning"
+        instructions: |
+          Pass if the PR title and commits follow the convention `verb(area): something`.
+          Fail if the title uses an unexpected verb or omits the area.
+      - name: "Test coverage"
+        mode: "warning"
+        instructions: |
+          Pass if behavior changes include focused tests for happy paths, edge cases, and invalid inputs.
+          Fail if the tests do not give maintainers confidence in the changed behavior, including missing edge cases, weak assertions, over-mocking, or manual-only verification.
+      - name: "Upstream mirror safety"
+        mode: "warning"
+        instructions: |
+          Pass if the PR does not depend on closed-source code the public mirror does not ship (packages/internal, desktop app source, private web app).
+          Fail if the PR references packages/internal or reads desktop/web-app source paths.
+          Pass when fork-local files (README.md, FORK.md, UPSTREAM_VERSION) change only intentionally and consistently with the sync workflow.
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    zizmor:
+      enabled: true
