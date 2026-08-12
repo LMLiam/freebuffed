@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-#
-# Automated tests for the upstream sync scripts:
-# .github/scripts/sync-upstream.sh and .github/scripts/upstream-sync-check.sh.
-#
-# Each test builds its own temporary local repositories (upstream mirror,
-# origin, work checkout) under TEST_ROOT, stubs `gh` so the GitHub CLI
-# operations are simulated and logged, and asserts on the results. The tests
-# do not use the network.
-#
-# The harness runs under `set -e` so fixture and setup errors abort loudly.
-# The sync script may fail on purpose, so run_sync captures its exit status in
-# `$status` instead of letting errexit abort.
-#
-# Note on assertions: outputs are captured into variables before grepping.
-# Piping git output straight into `grep -q` is racy under `set -o pipefail`
-# (grep exits on first match, the writer dies on SIGPIPE, the pipeline is
-# reported as failed).
-#
-# Usage:
-#   bash .github/scripts/sync-upstream_test.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +15,7 @@ fail_count=0
 pass() { pass_count=$((pass_count + 1)); echo "ok: $1"; }
 fail() { fail_count=$((fail_count + 1)); echo "FAIL: $1"; }
 
-assert_equals() { # $1 = expected, $2 = actual, $3 = message
+assert_equals() {
   if [[ "$1" == "$2" ]]; then
     pass "$3"
   else
@@ -43,7 +23,7 @@ assert_equals() { # $1 = expected, $2 = actual, $3 = message
   fi
 }
 
-assert_contains() { # $1 = pattern, $2 = text, $3 = message
+assert_contains() {
   if grep -qE -- "$1" <<< "$2"; then
     pass "$3"
   else
@@ -51,7 +31,7 @@ assert_contains() { # $1 = pattern, $2 = text, $3 = message
   fi
 }
 
-assert_not_contains() { # $1 = pattern, $2 = text, $3 = message
+assert_not_contains() {
   if grep -qE -- "$1" <<< "$2"; then
     fail "$3 — unexpected pattern '$1'"
   else
@@ -59,7 +39,7 @@ assert_not_contains() { # $1 = pattern, $2 = text, $3 = message
   fi
 }
 
-assert_status_failed() { # $1 = message
+assert_status_failed() {
   if [[ "$status" != "0" ]]; then
     pass "$1"
   else
@@ -67,7 +47,7 @@ assert_status_failed() { # $1 = message
   fi
 }
 
-assert_branch_exists() { # $1 = message
+assert_branch_exists() {
   if origin_has_branch; then
     pass "$1"
   else
@@ -75,7 +55,7 @@ assert_branch_exists() { # $1 = message
   fi
 }
 
-assert_no_branch() { # $1 = message
+assert_no_branch() {
   if origin_has_branch; then
     fail "$1 — sync/upstream exists"
   else
@@ -209,12 +189,10 @@ fixture_upstream=
 fixture_fork=
 fixture_work=
 
-new_fixture() { # $1 = scenario name
+new_fixture() {
   reset_gh
   local dir="$TEST_ROOT/$1"
   mkdir -p "$dir"
-  # Pin the default branch so the suite behaves identically on any runner
-  # (GitHub runners default to `master`; many local installs default to `main`).
   git init -q --bare --initial-branch=main "$dir/upstream.git"
   git init -q --bare --initial-branch=main "$dir/origin.git"
   git init -q --initial-branch=main "$dir/upstream"
@@ -249,7 +227,7 @@ new_fixture() { # $1 = scenario name
   fixture_work="$dir/work"
 }
 
-run_sync_with_env() { # $@ = environment arguments for the sync run
+run_sync_with_env() {
   if (
     cd "$fixture_work"
     git switch -q main 2>/dev/null || true
@@ -281,7 +259,7 @@ run_sync_ci() {
 sync_out() { cat "$fixture_dir/sync.out"; }
 sync_err() { cat "$fixture_dir/sync.err"; }
 
-upstream_commit() { # $1 = message
+upstream_commit() {
   git -C "$fixture_upstream" add -A
   git -C "$fixture_upstream" commit -qm "$1"
   git -C "$fixture_upstream" push -q origin main
@@ -292,13 +270,13 @@ switch_to_sync_branch() {
   git -C "$fixture_fork" switch -q -C sync/upstream origin/sync/upstream
 }
 
-commit_on_sync_branch() { # $1 = message
+commit_on_sync_branch() {
   git -C "$fixture_fork" add -A
   git -C "$fixture_fork" commit -qm "$1"
   git -C "$fixture_fork" push -q origin sync/upstream
 }
 
-commit_as_bot_on_sync_branch() { # $1 = message
+commit_as_bot_on_sync_branch() {
   git -C "$fixture_fork" add -A
   git -C "$fixture_fork" -c user.name="freebuffed[bot]" \
     -c user.email="spoofed@example.com" commit -qm "$1"
@@ -329,7 +307,7 @@ gh_log() {
 NOTICE_COMMENT_JSON='{"comments":[{"id":42,"body":"<!-- sync-conflict-notice -->"}]}'
 readonly NOTICE_COMMENT_JSON
 
-commit_on_main_branch() { # $1 = file, $2 = content, $3 = message
+commit_on_main_branch() {
   git -C "$fixture_fork" switch -q main
   printf '%s\n' "$2" > "$fixture_fork/$1"
   git -C "$fixture_fork" add -A
@@ -337,7 +315,7 @@ commit_on_main_branch() { # $1 = file, $2 = content, $3 = message
   git -C "$fixture_fork" push -q origin main
 }
 
-assert_title_edited() { # $1 = version, $2 = text
+assert_title_edited() {
   assert_contains "pr edit sync/upstream --title chore\\(upstream\\): sync freebuff $1" \
     "$2" "PR title advanced to $1"
 }
@@ -535,8 +513,6 @@ test_check_script_missing_branch() {
 
 test_check_script_tag_collision() {
   new_fixture "check-tag-collision"
-  # A tag named exactly like the branch must not make the check read two
-  # refs: the branch head only, on one line.
   git -C "$fixture_upstream" tag main
   git -C "$fixture_upstream" push -q origin \
     refs/heads/main:refs/heads/main refs/tags/main:refs/tags/main
@@ -564,7 +540,6 @@ test_check_script_github_outputs() {
   marker=$(tr -d '[:space:]' < "$fixture_fork/UPSTREAM_SHA")
   upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
 
-  # Up to date: the marker matches upstream, so changed=false.
   if (
     cd "$fixture_fork"
     UPSTREAM_URL="$fixture_dir/upstream.git" \
@@ -582,8 +557,6 @@ test_check_script_github_outputs() {
     "up-to-date reports the upstream head"
   assert_contains "^marker=${marker}$" "$check_out" "up-to-date reports the marker"
 
-  # New upstream commits: the check reports changed=true with the new head
-  # and keeps the old marker.
   echo "v2" > "$fixture_upstream/a.txt"
   upstream_commit "c2"
   new_head=$(git -C "$fixture_upstream" rev-parse HEAD)
@@ -628,8 +601,6 @@ test_filenames_with_spaces() {
 
 test_conflict_notice_non_ascii_path() {
   new_fixture "notice-non-ascii"
-  # A non-ASCII filename must appear readably in the notice, not as the
-  # octal-escaped form git grep emits by default.
   commit_on_main_branch "café.txt" "fork line" "fix: fork-local edit"
   echo "upstream" > "$fixture_upstream/café.txt"
   upstream_commit "c2"
@@ -643,9 +614,6 @@ test_conflict_notice_non_ascii_path() {
 
 test_conflict_notice_lists_files_as_bullets() {
   new_fixture "notice-bullets"
-  # The fork and upstream both change a file whose name contains spaces, so
-  # the sync conflicts on it. The notice must list the path as one bullet
-  # with a code span, not a flattened ambiguous string.
   commit_on_main_branch "file with spaces.txt" "fork line" "fix: fork-local edit"
   echo "upstream" > "$fixture_upstream/file with spaces.txt"
   upstream_commit "c2"
@@ -700,8 +668,6 @@ test_title_fallback_to_unknown() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # Remove the branch's version marker; the no-op run must fall back to
-  # "unknown" in the title instead of writing a trailing-space title.
   switch_to_sync_branch
   git -C "$fixture_fork" rm -q UPSTREAM_VERSION
   commit_on_sync_branch "chore: drop version marker"
@@ -819,9 +785,6 @@ test_remote_advance_rejects_push() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # Simulate a remote branch that advanced after the sync fetched it. A
-  # pre-push hook pushes a competing commit to origin/sync/upstream just
-  # before the sync pushes, so git rejects the sync's non-fast-forward push.
   git clone -q "$fixture_dir/origin.git" "$fixture_dir/competing"
   git -C "$fixture_dir/competing" config user.email o@o
   git -C "$fixture_dir/competing" config user.name o
@@ -855,8 +818,6 @@ test_closed_pr_with_live_branch() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # The PR is closed (stub reports CLOSED) but the branch is live. A new
-  # upstream commit opens a fresh PR against the same branch.
   echo "more" > "$fixture_upstream/c.txt"
   upstream_commit "c3"
   reset_gh
@@ -875,9 +836,6 @@ test_merged_pr_not_recreated() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # Simulate a merged PR: main fast-forwards to the sync branch tip and the
-  # PR state is MERGED. The branch has no commits ahead of main, so the sync
-  # must not recreate the pull request.
   git -C "$fixture_fork" fetch -q origin
   git -C "$fixture_fork" switch -q -C main origin/main
   git -C "$fixture_fork" merge -q --ff-only origin/sync/upstream
@@ -931,7 +889,6 @@ test_title_reconciled_after_failure() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # The version bumps to 0.0.147; the title update fails after the push.
   printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
   echo "more" > "$fixture_upstream/c.txt"
   upstream_commit "c3"
@@ -944,7 +901,6 @@ test_title_reconciled_after_failure() {
   assert_status_failed "title update failure fails the sync"
   assert_equals "0.0.147" "$(branch_file UPSTREAM_VERSION)" "marker advanced despite title failure"
 
-  # The next no-op run reconciles the stale title.
   reset_gh
   GH_STUB_STATE=OPEN
   run_sync
@@ -964,7 +920,6 @@ test_label_failure_reconciled() {
   assert_status_failed "label add failure fails the sync"
   assert_contains "pr create --draft" "$(gh_log)" "conflicted PR created before label failure"
 
-  # The next no-op run retries the label on the draft PR.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_DRAFT=true
@@ -981,8 +936,6 @@ test_ready_failure_reconciled() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # A clean, labelled, auto-drafted PR: the ready toggle fails once. The
-  # sync must fail loudly and keep the label so the next run can retry.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
@@ -995,7 +948,6 @@ test_ready_failure_reconciled() {
   gh_actions=$(gh_log)
   assert_not_contains "pr edit sync/upstream --remove-label" "$gh_actions" "label kept for retry"
 
-  # The next no-op run marks it ready and removes the label.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
@@ -1015,8 +967,6 @@ test_labels_read_failure_aborts() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # A failed labels read must not be treated as "no label": that would
-  # drop the label from a still-drafted pull request. The run fails loudly.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
@@ -1043,7 +993,6 @@ test_comment_failure_reconciled() {
   assert_status_failed "comment failure fails the sync"
   assert_contains "pr create --draft" "$(gh_log)" "conflicted PR created before comment failure"
 
-  # The next no-op run posts the missing conflict notice.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_DRAFT=true
@@ -1051,8 +1000,6 @@ test_comment_failure_reconciled() {
   assert_equals "0" "$status" "recovery run exits 0"
   assert_contains "pr comment" "$(gh_log)" "conflict notice posted on retry"
 
-  # An existing notice must be updated in place, not posted twice: the sync
-  # finds the marker comment by id and patches it.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_DRAFT=true
@@ -1073,10 +1020,6 @@ test_conflict_notice_updated_for_later_conflict() {
   assert_equals "0" "$status" "first conflicted sync exits 0"
   assert_contains "pr comment" "$(gh_log)" "first conflict notice posted"
 
-  # Resolve the first conflict and add a fork-local change to b.txt on the
-  # sync branch; upstream then changes b.txt, so the next sync conflicts in
-  # a different file. The existing notice must be updated, not suppressed
-  # and not duplicated.
   switch_to_sync_branch
   printf 'v2\nfork line\n' > "$fixture_fork/a.txt"
   echo "fork edit" > "$fixture_fork/b.txt"
@@ -1105,9 +1048,6 @@ test_state_read_failure_reconciled() {
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # A failed state read on a live branch must not be read as "not OPEN":
-  # the reconcile still runs and the create path fails loudly if a pull
-  # request exists.
   echo "more" > "$fixture_upstream/c.txt"
   upstream_commit "c3"
   reset_gh
@@ -1143,8 +1083,6 @@ test_conflict_label_api_failure_fails() {
   assert_not_contains "does not exist" "$(sync_err)" "API failure not reported as missing label"
   assert_no_branch "no branch created"
 
-  # A failed call (network error, rate limit) with no status line reports
-  # the failure with an unknown status, not a missing label.
   new_fixture "label-api-call-failure"
   export GH_STUB_FAIL='api repos/LMLiam/freebuffed/labels/*'
 

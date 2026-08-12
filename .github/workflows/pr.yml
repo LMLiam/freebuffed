@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Validate pull request title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: Collect commit subjects
@@ -36,9 +36,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMITS_URL: ${{ github.event.pull_request.commits_url }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        # Validate only commits that are not already on the base branch. The
-        # fork's main contains upstream mirror sync commits, which are not
-        # conventional; ancestry, not the subject, identifies them.
         run: |
           gh api --paginate "$COMMITS_URL" --jq '.[].sha' > commit-shas.txt
           while read -r sha; do
@@ -55,21 +52,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      # Committed conflict markers are not a git conflict, so GitHub still
-      # treats the pull request as mergeable. Fail instead if any changed
-      # file contains unresolved markers.
       - name: Fail on unresolved conflict markers in changed files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          # Consume the diff stream directly, NUL-delimited, so filenames
-          # containing newlines survive the scan.
           found=""
           count=0
           while IFS= read -r -d '' file; do

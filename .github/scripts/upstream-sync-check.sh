@@ -1,21 +1,9 @@
 #!/usr/bin/env bash
-#
-# Cheap check for new upstream commits. Runs before the full sync so that
-# no-op runs cost almost nothing.
-#
-# Writes GitHub Actions step outputs when GITHUB_OUTPUT is set:
-#   changed, upstream_sha, marker
-#
-# Usage:
-#   bash .github/scripts/upstream-sync-check.sh
 set -euo pipefail
 
 UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/CodebuffAI/freebuff.git}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 
-# Match the branch head ref explicitly. An unscoped pattern would also
-# match a tag named like the branch, which would make upstream_sha
-# multi-line and corrupt both the marker comparison and GITHUB_OUTPUT.
 upstream_sha=$(git ls-remote "$UPSTREAM_URL" "refs/heads/$UPSTREAM_BRANCH" | awk 'NR==1{print $1}')
 if [[ -z "$upstream_sha" ]]; then
   echo "::error::$UPSTREAM_BRANCH not found at $UPSTREAM_URL." >&2
