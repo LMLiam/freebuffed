@@ -58,7 +58,9 @@ changes to them.
 When upstream changes a file that the fork also changed, the sync applies
 with a three-way merge and leaves conflict markers in that file. The sync
 still opens or updates the pull request as a draft, with the conflicts
-visible in the diff and listed in a comment. The `Conflict markers` check
+visible in the diff and listed in one bot comment. The sync updates that
+comment in place on every run, so a later unrelated conflict updates the
+same comment instead of posting a second one. The `Conflict markers` check
 fails while any changed file contains unresolved markers. Resolve the
 markers and push a follow-up commit. The next sync run marks the pull
 request ready once it is clean.
