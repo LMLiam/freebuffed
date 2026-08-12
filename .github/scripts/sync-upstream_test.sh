@@ -116,7 +116,23 @@ case "${1:-}" in
       case "$*" in
         *"--json labels"*) printf '%s\n' "${GH_STUB_LABELS:-}" ;;
         *"--json isDraft"*) printf '%s\n' "${GH_STUB_DRAFT:-false}" ;;
-        *"--json comments"*) printf '%s\n' "${GH_STUB_COMMENTS:-}" ;;
+        *"--json comments"*)
+          # Apply the jq filter the sync script uses: emit the id of each
+          # comment whose body carries the conflict-notice marker. Build the
+          # JSON first: a brace-heavy ${VAR:-default} word would be split by
+          # bash's brace counting and append a stray brace to the value.
+          comments_json="${GH_STUB_COMMENTS_JSON:-}"
+          if [[ -z "$comments_json" ]]; then
+            comments_json='{"comments":[]}'
+          fi
+          python3 -c '
+import json, sys
+comments = json.loads(sys.argv[1]).get("comments", [])
+for c in comments:
+    if "sync-conflict-notice" in c.get("body", ""):
+        print(c["id"])
+' "$comments_json" || exit 1
+          ;;
         *"--json state"*) printf '%s\n' "${GH_STUB_STATE:-CLOSED}" ;;
         *) printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}" ;;
       esac
@@ -255,7 +271,7 @@ reset_gh() {
   GH_STUB_STATE=CLOSED
   GH_STUB_LABELS=''
   export GH_STUB_DRAFT=false
-  export GH_STUB_COMMENTS=''
+  export GH_STUB_COMMENTS_JSON='{"comments":[]}'
   unset GH_STUB_FAIL
   unset GH_STUB_HTTP_STATUS
 }
@@ -316,14 +332,18 @@ test_conflict_then_resolution() {
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
   GH_STUB_DRAFT=true
+  export GH_STUB_COMMENTS_JSON='{"comments":[{"id":42,"body":"<!-- sync-conflict-notice -->\n⚠️ Sync has conflicts in: a.txt. The pull request is a draft and stays a draft until the conflicts are resolved."}]}'
 
   run_sync
+  unset GH_STUB_COMMENTS_JSON
   assert_equals "0" "$status" "resolution run exits 0"
   assert_contains "Up to date" "$(sync_out)" "resolution run is a no-op"
   gh_actions=$(gh_log)
   assert_contains "pr ready" "$gh_actions" "PR marked as ready for review"
   assert_not_contains "pr ready --undo" "$gh_actions" "PR not drafted again"
   assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "conflict label removed"
+  assert_contains "PATCH" "$gh_actions" "stale conflict notice updated to resolved"
+  assert_not_contains "pr comment" "$gh_actions" "no new comment posted on resolution"
   GH_STUB_LABELS=''
 }
 
@@ -874,16 +894,55 @@ test_comment_failure_reconciled() {
   assert_equals "0" "$status" "recovery run exits 0"
   assert_contains "pr comment" "$(gh_log)" "conflict notice posted on retry"
 
-  # An existing notice must not be posted twice: the de-duplication check
-  # reads the comments and skips when the notice is already present.
+  # An existing notice must be updated in place, not posted twice: the sync
+  # finds the marker comment by id and patches it.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_DRAFT=true
-  export GH_STUB_COMMENTS='⚠️ Sync has conflicts in: a.txt.'
+  export GH_STUB_COMMENTS_JSON='{"comments":[{"id":42,"body":"<!-- sync-conflict-notice -->\n⚠️ Sync has conflicts in: a.txt. The pull request is a draft and stays a draft until the conflicts are resolved."}]}'
   run_sync
-  unset GH_STUB_COMMENTS
+  unset GH_STUB_COMMENTS_JSON
   assert_equals "0" "$status" "duplicate-notice run exits 0"
   assert_not_contains "pr comment" "$(gh_log)" "existing conflict notice not duplicated"
+  assert_contains "PATCH" "$(gh_log)" "existing conflict notice updated in place"
+}
+
+test_conflict_notice_updated_for_later_conflict() {
+  new_fixture "notice-update"
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" >> "$fixture_fork/a.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first conflicted sync exits 0"
+  assert_contains "pr comment" "$(gh_log)" "first conflict notice posted"
+
+  # Resolve the first conflict and add a fork-local change to b.txt on the
+  # sync branch; upstream then changes b.txt, so the next sync conflicts in
+  # a different file. The existing notice must be updated, not suppressed
+  # and not duplicated.
+  switch_to_sync_branch
+  printf 'v2\nfork line\n' > "$fixture_fork/a.txt"
+  echo "fork edit" > "$fixture_fork/b.txt"
+  commit_on_sync_branch "fix: resolve first conflict"
+  echo "upstream b" > "$fixture_upstream/b.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  export GH_STUB_COMMENTS_JSON='{"comments":[{"id":42,"body":"<!-- sync-conflict-notice -->\n⚠️ Sync has conflicts in: a.txt. The pull request is a draft and stays a draft until the conflicts are resolved."}]}'
+
+  run_sync
+  unset GH_STUB_COMMENTS_JSON
+  assert_equals "0" "$status" "later-conflict sync exits 0"
+  gh_actions=$(gh_log)
+  assert_contains "b.txt" "$gh_actions" "notice updated with the later conflicted file"
+  assert_not_contains "sync/upstream:" "$gh_actions" "notice lists plain paths, not rev-prefixed"
+  assert_not_contains "pr comment" "$gh_actions" "existing notice not recreated"
+  assert_contains "PATCH" "$gh_actions" "existing notice updated in place"
 }
 
 test_state_read_failure_reconciled() {
@@ -1017,6 +1076,7 @@ run_all_tests() {
     test_labels_read_failure_aborts
     test_state_read_failure_reconciled
     test_comment_failure_reconciled
+    test_conflict_notice_updated_for_later_conflict
     test_missing_conflict_label_fails
     test_conflict_label_api_failure_fails
     test_conflict_label_failure_aborts

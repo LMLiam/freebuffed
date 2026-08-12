@@ -52,7 +52,10 @@ conflicted_files() {
   if [[ ${#files[@]} -eq 0 ]]; then
     return 1
   fi
-  git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" 2>/dev/null
+  # git grep prefixes matches with "$ref:"; strip it so the conflict
+  # notice lists plain paths, not "origin/sync/upstream:a.txt".
+  git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" 2>/dev/null |
+    sed "s|^$ref:||"
 }
 
 branch_has_conflicts() {
@@ -87,7 +90,9 @@ ensure_conflict_label() {
 # the branch itself, so a stale title is repaired even when main lags.
 reconcile_pr() {
   local ref="$1"
-  local version title state is_draft pr_labels comments
+  local version title state is_draft pr_labels
+  local notice_marker notice_ids notice_id notice_files notice_body
+  notice_marker='<!-- sync-conflict-notice -->'
   # Capture the version before stripping whitespace, so a failed read falls
   # back to "unknown" instead of producing an empty version.
   version=$(git show "$ref:UPSTREAM_VERSION" 2>/dev/null || true)
@@ -143,16 +148,25 @@ EOF
       gh pr ready --undo "$SYNC_BRANCH"
     fi
     gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
-    # Read the comments loudly: a failed read must not be treated as "no
-    # notice", which would repost the comment on every run until the API
-    # recovers.
-    if ! comments=$(gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null); then
+    # One identifiable bot comment lists the conflicted files, and the sync
+    # updates it in place. A later unrelated conflict updates the same
+    # comment, so no notice is suppressed and none is duplicated. Read the
+    # comments loudly: a failed read must not be treated as "no notice",
+    # which would post a duplicate on every run until the API recovers.
+    if ! notice_ids=$(gh pr view "$SYNC_BRANCH" --json comments \
+      --jq '.comments[] | select(.body | contains("sync-conflict-notice")) | .id' 2>/dev/null); then
       echo "::error::could not read comments for $SYNC_BRANCH" >&2
       exit 1
     fi
-    if ! grep -q "Sync has conflicts" <<< "$comments"; then
-      gh pr comment "$SYNC_BRANCH" --body \
-        "⚠️ Sync has conflicts in: $(conflicted_files "$ref" | tr '\n' ' '). The pull request is a draft and stays a draft until the conflicts are resolved."
+    notice_id=${notice_ids%%$'\n'*}
+    notice_files=$(conflicted_files "$ref" | tr '\n' ' ')
+    notice_files=${notice_files% }
+    notice_body=$(printf '%s\n⚠️ Sync has conflicts in: %s. The pull request is a draft and stays a draft until the conflicts are resolved.\n' \
+      "$notice_marker" "$notice_files")
+    if [[ -n "$notice_id" ]]; then
+      gh api -X PATCH "repos/$REPO/issues/comments/$notice_id" -f body="$notice_body"
+    else
+      gh pr comment "$SYNC_BRANCH" --body "$notice_body"
     fi
     return 0
   fi
@@ -165,11 +179,22 @@ EOF
     exit 1
   fi
   if grep -qx "$CONFLICT_LABEL" <<< "$pr_labels"; then
-    # Clean again. Mark the auto-drafted pull request ready, then drop the
-    # label so a manual draft is never forced ready by a later run. A failure
-    # here aborts the sync and is retried on the next run.
+    # Clean again. Mark the auto-drafted pull request ready, update the
+    # stale conflict notice to resolved, then drop the label so a manual
+    # draft is never forced ready by a later run. A failure here aborts the
+    # sync and is retried on the next run.
     if [[ "$is_draft" == "true" ]]; then
       gh pr ready "$SYNC_BRANCH"
+    fi
+    if ! notice_ids=$(gh pr view "$SYNC_BRANCH" --json comments \
+      --jq '.comments[] | select(.body | contains("sync-conflict-notice")) | .id' 2>/dev/null); then
+      echo "::error::could not read comments for $SYNC_BRANCH" >&2
+      exit 1
+    fi
+    notice_id=${notice_ids%%$'\n'*}
+    if [[ -n "$notice_id" ]]; then
+      notice_body=$(printf '%s\n✔️ Sync conflicts are resolved and the pull request is ready for review.\n' "$notice_marker")
+      gh api -X PATCH "repos/$REPO/issues/comments/$notice_id" -f body="$notice_body"
     fi
     gh pr edit "$SYNC_BRANCH" --remove-label "$CONFLICT_LABEL"
   fi
