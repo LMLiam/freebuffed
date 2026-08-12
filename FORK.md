@@ -63,6 +63,13 @@ fails while any changed file contains unresolved markers. Resolve the
 markers and push a follow-up commit. The next sync run marks the pull
 request ready once it is clean.
 
+The sync uses the state label `upstream-conflict` to distinguish pull
+requests it drafted automatically because of conflicts from pull requests a
+maintainer drafted manually. The label is a prerequisite. Create it once
+with `gh label create upstream-conflict`. The sync fails loudly when the
+label is missing or when it cannot add or remove the label, so a conflicted
+pull request cannot be left as a draft silently.
+
 The upstream sync script has automated integration tests
 (`.github/scripts/sync-upstream_test.sh`). They run in CI on every pull
 request and on every push to `main`.
