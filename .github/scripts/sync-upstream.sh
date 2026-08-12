@@ -11,6 +11,9 @@
 # only fork-local paths. The script pushes a marker-only commit so the next
 # run can detect upstream commits it has not examined yet.
 #
+# The sync labels conflicted pull requests with `upstream-conflict`. The label
+# is a prerequisite: it must exist in the repository or the sync fails loudly.
+#
 # Usage:
 #   bash .github/scripts/sync-upstream.sh
 set -euo pipefail
@@ -52,11 +55,18 @@ branch_has_conflicts() {
   git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" >/dev/null 2>&1
 }
 
+ensure_conflict_label() {
+  if ! gh api "repos/$REPO/labels/$CONFLICT_LABEL" >/dev/null 2>&1; then
+    echo "::error::label '$CONFLICT_LABEL' does not exist. Create it once with: gh label create \"$CONFLICT_LABEL\" --color d73a4a --description 'Sync pull request has unresolved conflict markers'" >&2
+    exit 1
+  fi
+}
+
 create_sync_pr() {
   if branch_has_conflicts "$2"; then
     gh pr create --draft --base main --head "$SYNC_BRANCH" \
       --title "$1" --body-file "$body_file"
-    gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL" 2>/dev/null || true
+    gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
   else
     gh pr create --base main --head "$SYNC_BRANCH" \
       --title "$1" --body-file "$body_file"
@@ -66,11 +76,11 @@ create_sync_pr() {
 sync_draft_state() {
   if branch_has_conflicts "$1"; then
     gh pr ready --undo "$SYNC_BRANCH" 2>/dev/null || true
-    gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL" 2>/dev/null || true
+    gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
   elif gh pr view "$SYNC_BRANCH" --json labels \
     --jq '.labels[].name' 2>/dev/null | grep -qx "$CONFLICT_LABEL"; then
     gh pr ready "$SYNC_BRANCH" 2>/dev/null || true
-    gh pr edit "$SYNC_BRANCH" --remove-label "$CONFLICT_LABEL" 2>/dev/null || true
+    gh pr edit "$SYNC_BRANCH" --remove-label "$CONFLICT_LABEL"
   fi
 }
 
@@ -90,6 +100,8 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo "error: working tree is not clean — commit or stash your changes first" >&2
   exit 1
 fi
+
+ensure_conflict_label
 
 main_marker=$(tr -d '[:space:]' < UPSTREAM_SHA 2>/dev/null || true)
 if [[ -z "$main_marker" ]]; then

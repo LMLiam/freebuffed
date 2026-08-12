@@ -680,23 +680,54 @@ test_gh_edit_failure_aborts() {
   assert_contains "sync freebuff" "$(branch_top)" "branch appended before edit failure"
 }
 
-test_draft_state_failures_tolerated() {
-  new_fixture "draft-fail"
+test_draft_toggle_failure_tolerated() {
+  new_fixture "draft-toggle-fail"
   echo "upstream file" > "$fixture_upstream/b.txt"
   upstream_commit "c2"
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # A no-op run with an open, labeled PR would mark it ready. If the
-  # draft-state gh calls fail, the sync must still exit 0 (they are masked).
+  # A no-op run with an open, labelled PR marks it ready and removes the
+  # label. The ready toggle is idempotent, so its failure is tolerated;
+  # the state-bearing label removal must still be attempted.
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
-  export GH_STUB_FAIL='pr ready*,pr edit*'
+  export GH_STUB_FAIL='pr ready*'
 
   run_sync
   unset GH_STUB_FAIL
-  assert_equals "0" "$status" "draft-state gh failures tolerated"
+  assert_equals "0" "$status" "ready toggle failure tolerated"
+  gh_actions=$(gh_log)
+  assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "label removal still attempted"
+}
+
+test_missing_conflict_label_fails() {
+  new_fixture "missing-label"
+  export GH_STUB_FAIL='api repos/LMLiam/freebuffed/labels/*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "missing label fails the sync"
+  assert_contains "does not exist" "$(sync_err)" "missing label reported"
+  assert_no_branch "no branch created"
+}
+
+test_conflict_label_failure_aborts() {
+  new_fixture "conflict-label-fail"
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" >> "$fixture_fork/a.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  export GH_STUB_FAIL='pr edit*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "label add failure aborts the sync"
+  assert_contains "pr create --draft" "$(gh_log)" "conflicted PR created before label failure"
 }
 
 test_missing_version_file_fails() {
@@ -748,7 +779,9 @@ run_all_tests() {
     test_merged_pr_not_recreated
     test_gh_create_failure_aborts
     test_gh_edit_failure_aborts
-    test_draft_state_failures_tolerated
+    test_draft_toggle_failure_tolerated
+    test_missing_conflict_label_fails
+    test_conflict_label_failure_aborts
     test_missing_version_file_fails
     test_invalid_version_json_fails
   )
