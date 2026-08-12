@@ -53,8 +53,9 @@ conflicted_files() {
     return 1
   fi
   # git grep prefixes matches with "$ref:"; strip it so the conflict
-  # notice lists plain paths, not "origin/sync/upstream:a.txt".
-  git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" 2>/dev/null |
+  # notice lists plain paths, not "origin/sync/upstream:a.txt". Print
+  # non-ASCII paths readably instead of as octal escapes.
+  git -c core.quotePath=false grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" 2>/dev/null |
     sed "s|^$ref:||"
 }
 
@@ -67,10 +68,12 @@ ensure_conflict_label() {
   # Distinguish a missing label (404) from an API failure such as a network
   # error, rate limit, or missing permission: only a confirmed 404 gets the
   # create hint, and any other failure aborts with its own message.
-  if ! code=$(gh api "repos/$REPO/labels/$CONFLICT_LABEL" --silent --include 2>/dev/null | awk 'NR==1{print $2}'); then
-    echo "::error::could not read label '$CONFLICT_LABEL' (API call failed)" >&2
-    exit 1
-  fi
+  # gh api prints the status line with --include but exits non-zero on HTTP
+  # error statuses, so capture the output regardless of the exit status and
+  # decide on the status code itself; an empty status line means the call
+  # produced no response at all.
+  code=$(gh api "repos/$REPO/labels/$CONFLICT_LABEL" --silent --include 2>/dev/null |
+    awk 'NR==1{print $2}' || true)
   case "$code" in
     200) return 0 ;;
     404)

@@ -139,8 +139,13 @@ for c in comments:
     fi
     ;;
   "api")
-    # Emulate the HTTP status line gh api --include prints on success.
-    printf 'HTTP/2 %s\n' "${GH_STUB_HTTP_STATUS:-200}"
+    # Emulate the HTTP status line gh api --include prints. Real gh exits
+    # non-zero on HTTP error statuses, so do the same after printing.
+    status="${GH_STUB_HTTP_STATUS:-200}"
+    printf 'HTTP/2 %s\n' "$status"
+    if [[ "$status" -ge 400 ]]; then
+      exit 1
+    fi
     ;;
 esac
 exit 0
@@ -539,6 +544,25 @@ test_filenames_with_spaces() {
   run_sync
   assert_equals "0" "$status" "sync exits 0"
   assert_equals "spaced content" "$(branch_file "file with spaces.txt")" "spaced filename applied"
+}
+
+test_conflict_notice_non_ascii_path() {
+  new_fixture "notice-non-ascii"
+  # A non-ASCII filename must appear readably in the notice, not as the
+  # octal-escaped form git grep emits by default.
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" > "$fixture_fork/café.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "upstream" > "$fixture_upstream/café.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "conflicted sync exits 0"
+  gh_actions=$(gh_log)
+  assert_contains "café.txt" "$gh_actions" "notice lists the readable non-ASCII path"
+  assert_not_contains '"caf' "$gh_actions" "notice does not contain the quoted octal-escaped path"
 }
 
 test_conflict_notice_lists_files_as_bullets() {
@@ -1057,15 +1081,15 @@ test_conflict_label_api_failure_fails() {
   assert_not_contains "does not exist" "$(sync_err)" "API failure not reported as missing label"
   assert_no_branch "no branch created"
 
-  # A failed call (network error, rate limit) with no status line reports the
-  # call failure, not a missing label.
+  # A failed call (network error, rate limit) with no status line reports
+  # the failure with an unknown status, not a missing label.
   new_fixture "label-api-call-failure"
   export GH_STUB_FAIL='api repos/LMLiam/freebuffed/labels/*'
 
   run_sync
   unset GH_STUB_FAIL
   assert_status_failed "label API call failure fails the sync"
-  assert_contains "API call failed" "$(sync_err)" "failed API call reported"
+  assert_contains "status unknown" "$(sync_err)" "failed API call reported as unknown status"
   assert_not_contains "does not exist" "$(sync_err)" "call failure not reported as missing label"
 }
 
@@ -1131,6 +1155,7 @@ run_all_tests() {
     test_new_conflicted_pr_created_draft
     test_apply_failure_not_misclassified
     test_marker_example_outside_change_set
+    test_conflict_notice_non_ascii_path
     test_conflict_notice_lists_files_as_bullets
     test_missing_and_invalid_branch_marker
     test_remote_advance_rejects_push
