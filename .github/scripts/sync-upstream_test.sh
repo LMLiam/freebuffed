@@ -1,0 +1,725 @@
+#!/usr/bin/env bash
+#
+# Automated tests for .github/scripts/sync-upstream.sh.
+#
+# Each test builds its own temporary local repositories (upstream mirror,
+# origin, work checkout) under TEST_ROOT, stubs `gh` so the GitHub CLI
+# operations are simulated and logged, and asserts on the results. The tests
+# do not use the network.
+#
+# The harness runs under `set -e` so fixture and setup errors abort loudly.
+# The sync script may fail on purpose, so run_sync captures its exit status in
+# `$status` instead of letting errexit abort.
+#
+# Note on assertions: outputs are captured into variables before grepping.
+# Piping git output straight into `grep -q` is racy under `set -o pipefail`
+# (grep exits on first match, the writer dies on SIGPIPE, the pipeline is
+# reported as failed).
+#
+# Usage:
+#   bash .github/scripts/sync-upstream_test.sh
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYNC_SCRIPT="$SCRIPT_DIR/sync-upstream.sh"
+readonly SCRIPT_DIR SYNC_SCRIPT
+
+TEST_ROOT="$(mktemp -d)"
+readonly TEST_ROOT
+trap 'rm -rf "$TEST_ROOT"' EXIT
+
+pass_count=0
+fail_count=0
+pass() { pass_count=$((pass_count + 1)); echo "ok: $1"; }
+fail() { fail_count=$((fail_count + 1)); echo "FAIL: $1"; }
+
+assert_equals() { # $1 = expected, $2 = actual, $3 = message
+  if [[ "$1" == "$2" ]]; then
+    pass "$3"
+  else
+    fail "$3 — expected '$1', got '$2'"
+  fi
+}
+
+assert_contains() { # $1 = pattern, $2 = text, $3 = message
+  if grep -qE -- "$1" <<< "$2"; then
+    pass "$3"
+  else
+    fail "$3 — pattern '$1' not found"
+  fi
+}
+
+assert_not_contains() { # $1 = pattern, $2 = text, $3 = message
+  if grep -qE -- "$1" <<< "$2"; then
+    fail "$3 — unexpected pattern '$1'"
+  else
+    pass "$3"
+  fi
+}
+
+assert_status_ok() { # $1 = message
+  assert_equals "0" "$status" "$1"
+}
+
+assert_status_failed() { # $1 = message
+  if [[ "$status" != "0" ]]; then
+    pass "$1"
+  else
+    fail "$1 — sync unexpectedly exited 0"
+  fi
+}
+
+assert_branch_exists() { # $1 = message
+  if origin_has_branch; then
+    pass "$1"
+  else
+    fail "$1 — sync/upstream missing"
+  fi
+}
+
+assert_no_branch() { # $1 = message
+  if origin_has_branch; then
+    fail "$1 — sync/upstream exists"
+  else
+    pass "$1"
+  fi
+}
+
+mkdir -p "$TEST_ROOT/bin"
+cat > "$TEST_ROOT/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+LOG="${GH_STUB_LOG:?gh stub needs GH_STUB_LOG}"
+printf 'gh %s\n' "$*" >> "$LOG"
+case "${1:-} ${2:-}" in
+  "pr view")
+    if [[ "$*" == *"--json labels"* ]]; then
+      printf '%s\n' "${GH_STUB_LABELS:-}"
+    else
+      printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}"
+    fi
+    ;;
+esac
+# Simulate a gh failure. GH_STUB_FAIL is a comma-separated list of globs.
+# When the full command line matches one, exit non-zero after logging.
+# Note: capture "$*" before changing IFS, which controls how "$*" joins args.
+if [[ -n "${GH_STUB_FAIL:-}" ]]; then
+  cmd_line="$*"
+  IFS=,
+  for fail_pat in $GH_STUB_FAIL; do
+    if [[ -n "$fail_pat" && "$cmd_line" == $fail_pat ]]; then
+      exit 1
+    fi
+  done
+fi
+exit 0
+EOF
+chmod +x "$TEST_ROOT/bin/gh"
+export PATH="$TEST_ROOT/bin:$PATH"
+export GH_STUB_LOG="$TEST_ROOT/gh.log"
+: > "$GH_STUB_LOG"
+export GH_STUB_STATE=CLOSED
+export GH_STUB_LABELS=''
+
+fixture_dir=
+fixture_upstream=
+fixture_fork=
+fixture_work=
+
+new_fixture() { # $1 = scenario name
+  reset_gh
+  local dir="$TEST_ROOT/$1"
+  mkdir -p "$dir"
+  # Pin the default branch so the suite behaves identically on any runner
+  # (GitHub runners default to `master`; many local installs default to `main`).
+  git init -q --bare --initial-branch=main "$dir/upstream.git"
+  git init -q --bare --initial-branch=main "$dir/origin.git"
+  git init -q --initial-branch=main "$dir/upstream"
+  git -C "$dir/upstream" config user.email t@t
+  git -C "$dir/upstream" config user.name t
+  echo "v1" > "$dir/upstream/a.txt"
+  mkdir -p "$dir/upstream/freebuff/cli/release"
+  printf '{"version":"0.0.146"}' > "$dir/upstream/freebuff/cli/release/package.json"
+  git -C "$dir/upstream" add -A
+  git -C "$dir/upstream" commit -qm "c1"
+  git -C "$dir/upstream" remote add origin "$dir/upstream.git"
+  git -C "$dir/upstream" push -q origin main
+
+  git clone -q "$dir/upstream" "$dir/fork"
+  git -C "$dir/fork" config user.email u@u
+  git -C "$dir/fork" config user.name u
+  git -C "$dir/upstream" rev-parse HEAD > "$dir/fork/UPSTREAM_SHA"
+  echo "0.0.146" > "$dir/fork/UPSTREAM_VERSION"
+  echo "fork readme" > "$dir/fork/README.md"
+  git -C "$dir/fork" add -A
+  git -C "$dir/fork" commit -qm "fork bootstrap"
+  git -C "$dir/fork" remote set-url origin "$dir/origin.git"
+  git -C "$dir/fork" push -q origin main
+
+  git clone -q "$dir/origin.git" "$dir/work"
+  git -C "$dir/work" config user.email w@w
+  git -C "$dir/work" config user.name w
+
+  fixture_dir="$dir"
+  fixture_upstream="$dir/upstream"
+  fixture_fork="$dir/fork"
+  fixture_work="$dir/work"
+}
+
+run_sync_with_env() { # $@ = environment arguments for the sync run
+  if (
+    cd "$fixture_work"
+    git switch -q main 2>/dev/null || true
+    git pull -q origin main 2>/dev/null || true
+    if env "$@" \
+      UPSTREAM_URL="$fixture_dir/upstream.git" \
+      bash "$SYNC_SCRIPT" >"$fixture_dir/sync.out" 2>"$fixture_dir/sync.err"; then
+      sync_status=0
+    else
+      sync_status=$?
+    fi
+    git fetch -q origin 2>/dev/null || true
+    exit "$sync_status"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+}
+
+run_sync() {
+  run_sync_with_env -u GITHUB_ACTIONS -u GH_TOKEN
+}
+
+run_sync_ci() {
+  run_sync_with_env GITHUB_ACTIONS=true GH_TOKEN=
+}
+
+sync_out() { cat "$fixture_dir/sync.out"; }
+sync_err() { cat "$fixture_dir/sync.err"; }
+
+upstream_commit() { # $1 = message
+  git -C "$fixture_upstream" add -A
+  git -C "$fixture_upstream" commit -qm "$1"
+  git -C "$fixture_upstream" push -q origin main
+}
+
+switch_to_sync_branch() {
+  git -C "$fixture_fork" fetch -q origin
+  git -C "$fixture_fork" switch -q -C sync/upstream origin/sync/upstream
+}
+
+commit_on_sync_branch() { # $1 = message
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "$1"
+  git -C "$fixture_fork" push -q origin sync/upstream
+}
+
+commit_as_bot_on_sync_branch() { # $1 = message
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" -c user.name="freebuffed[bot]" \
+    -c user.email="spoofed@example.com" commit -qm "$1"
+  git -C "$fixture_fork" push -q origin sync/upstream
+}
+
+branch_file() { git -C "$fixture_work" show "origin/sync/upstream:$1" 2>/dev/null; }
+branch_log() { git -C "$fixture_work" log --oneline --format='%h %an %s' origin/sync/upstream 2>/dev/null; }
+branch_top() { git -C "$fixture_work" log -1 --format='%h %an %s' origin/sync/upstream 2>/dev/null; }
+origin_has_branch() { [[ -n "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream 2>/dev/null)" ]]; }
+
+gh_log() {
+  if [[ ! -e "$GH_STUB_LOG" ]]; then
+    echo "gh_log: $GH_STUB_LOG is missing — the gh stub never wrote a log for this fixture" >&2
+    return 1
+  fi
+  cat "$GH_STUB_LOG"
+}
+
+reset_gh() {
+  : > "$TEST_ROOT/gh.log"
+  GH_STUB_STATE=CLOSED
+  GH_STUB_LABELS=''
+  unset GH_STUB_FAIL
+}
+
+test_already_up_to_date() {
+  new_fixture "already-up-to-date"
+  run_sync
+  assert_equals "0" "$status" "no-op exits 0"
+  assert_contains "Up to date" "$(sync_out)" "reports up to date"
+  assert_no_branch "creates no branch"
+  assert_not_contains "pr create" "$(gh_log)" "creates no PR"
+}
+
+test_clean_upstream_update() {
+  new_fixture "clean-update"
+  echo "v2" > "$fixture_upstream/a.txt"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+
+  run_sync
+  assert_equals "0" "$status" "sync exits 0"
+  assert_branch_exists "branch created"
+  assert_equals "v2" "$(branch_file a.txt)" "upstream change to a.txt applied"
+  assert_equals "upstream file" "$(branch_file b.txt)" "upstream file b.txt added"
+  assert_equals "fork readme" "$(branch_file README.md)" "fork-local README intact"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" "marker advanced to upstream head"
+  assert_contains "pr create" "$(gh_log)" "PR created"
+}
+
+test_conflict_then_resolution() {
+  new_fixture "conflict-cycle"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  switch_to_sync_branch
+  echo "user line" >> "$fixture_fork/a.txt"
+  commit_on_sync_branch "fix: manual edit"
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  GH_STUB_STATE=OPEN
+
+  run_sync
+  assert_equals "0" "$status" "conflicted sync exits 0"
+  conflicted_text=$(branch_file a.txt)
+  assert_contains '^<<<<<<< ' "$conflicted_text" "conflict markers left in diff"
+  assert_contains '^>>>>>>> ' "$conflicted_text" "conflict markers left in diff"
+  assert_contains "pr ready --undo" "$(gh_log)" "PR set to draft"
+  assert_contains "pr edit sync/upstream --add-label upstream-conflict" "$(gh_log)" "conflict label added"
+  assert_contains "pr comment" "$(gh_log)" "conflict comment posted"
+
+  switch_to_sync_branch
+  printf 'v3\nuser line\n' > "$fixture_fork/a.txt"
+  commit_on_sync_branch "fix: resolve conflict"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_LABELS='upstream-conflict'
+
+  run_sync
+  assert_equals "0" "$status" "resolution run exits 0"
+  assert_contains "Up to date" "$(sync_out)" "resolution run is a no-op"
+  gh_actions=$(gh_log)
+  assert_contains "pr ready" "$gh_actions" "PR marked as ready for review"
+  assert_not_contains "pr ready --undo" "$gh_actions" "PR not drafted again"
+  assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "conflict label removed"
+  GH_STUB_LABELS=''
+}
+
+test_excluded_only_change_advances_marker() {
+  new_fixture "excluded-only-change"
+  echo "upstream docs" > "$fixture_upstream/README.md"
+  upstream_commit "docs: readme"
+  upstream_head=$(git -C "$fixture_upstream" rev-parse HEAD)
+
+  run_sync
+  assert_equals "0" "$status" "sync exits 0"
+  assert_branch_exists "branch created"
+  assert_equals "$upstream_head" "$(branch_file UPSTREAM_SHA)" "marker advanced despite excluded-only change"
+  assert_equals "fork readme" "$(branch_file README.md)" "upstream README change not applied"
+  assert_contains "sync freebuff 0.0.146" "$(branch_top)" "marker-only commit"
+  assert_contains "pr create" "$(gh_log)" "PR created"
+}
+
+test_existing_branch_appends() {
+  new_fixture "existing-branch"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+
+  run_sync
+  assert_equals "0" "$status" "second sync exits 0"
+  assert_equals "upstream file" "$(branch_file b.txt)" "first update applied"
+  assert_equals "more" "$(branch_file c.txt)" "second update applied"
+  assert_equals "2" "$(grep -c 'chore(upstream)' <<< "$(branch_log)")" "two appended sync commits"
+  assert_not_contains "pr create" "$(gh_log)" "PR reused, not recreated"
+}
+
+test_manual_edits_preserved() {
+  new_fixture "manual-edits"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  switch_to_sync_branch
+  echo "manual user fix" > "$fixture_fork/manual.txt"
+  commit_as_bot_on_sync_branch "fix: manual resolution"
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  GH_STUB_STATE=OPEN
+
+  run_sync
+  assert_equals "0" "$status" "append exits 0"
+  assert_equals "manual user fix" "$(branch_file manual.txt)" "manual.txt preserved"
+  assert_contains "fix: manual resolution" "$(branch_log)" "manual commit still in history"
+  assert_contains 'chore\(upstream\)' "$(branch_top)" "bot appended on top"
+}
+
+test_missing_and_invalid_marker() {
+  new_fixture "marker-errors"
+  git -C "$fixture_fork" rm -q UPSTREAM_SHA
+  git -C "$fixture_fork" commit -qm "drop marker"
+  git -C "$fixture_fork" push -q origin main
+
+  run_sync
+  assert_status_failed "missing marker fails"
+  assert_contains "UPSTREAM_SHA is empty" "$(sync_err)" "missing marker reported"
+
+  echo "0123456789abcdef0123456789abcdef01234567" > "$fixture_fork/UPSTREAM_SHA"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "bad marker"
+  git -C "$fixture_fork" push -q origin main
+
+  run_sync
+  assert_status_failed "invalid marker fails"
+  assert_contains "is not a commit" "$(sync_err)" "invalid marker reported"
+  assert_no_branch "no branch created on error"
+}
+
+test_upstream_branch_lookup_failure() {
+  new_fixture "branch-lookup-failure"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  export UPSTREAM_BRANCH=does-not-exist
+
+  run_sync
+  unset UPSTREAM_BRANCH
+  assert_status_failed "fetch failure exits non-zero"
+  assert_no_branch "no branch created"
+  assert_not_contains "pr create" "$(gh_log)" "no PR created"
+}
+
+test_version_from_synced_tree() {
+  new_fixture "version-from-tree"
+  printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
+  echo "more" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "sync exits 0"
+  assert_equals "0.0.147" "$(branch_file UPSTREAM_VERSION)" "UPSTREAM_VERSION from tree"
+  assert_contains "sync freebuff 0.0.147" "$(branch_top)" "commit message carries tree version"
+}
+
+test_filenames_with_spaces() {
+  new_fixture "filenames-with-spaces"
+  echo "spaced content" > "$fixture_upstream/file with spaces.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "sync exits 0"
+  assert_equals "spaced content" "$(branch_file "file with spaces.txt")" "spaced filename applied"
+}
+
+test_missing_token_in_ci_mode() {
+  new_fixture "missing-token"
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+
+  run_sync_ci
+  assert_status_failed "missing token fails"
+  assert_contains "GH_TOKEN is empty" "$(sync_err)" "missing token reported"
+}
+
+test_open_pr_title_advances() {
+  new_fixture "open-pr-title"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+
+  run_sync
+  assert_equals "0" "$status" "second sync exits 0"
+  assert_equals "0.0.147" "$(branch_file UPSTREAM_VERSION)" "marker version advanced"
+  assert_contains "sync freebuff 0.0.147" "$(branch_top)" "commit carries 0.0.147"
+  gh_actions=$(gh_log)
+  assert_contains 'pr edit sync/upstream --title chore\(upstream\): sync freebuff 0\.0\.147' "$gh_actions" "PR title advanced to 0.0.147"
+  assert_not_contains "pr create" "$gh_actions" "PR reused, not recreated"
+}
+
+test_manual_draft_left_alone() {
+  new_fixture "manual-draft"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  reset_gh
+  GH_STUB_STATE=OPEN
+  run_sync
+  assert_equals "0" "$status" "no-op run exits 0"
+  gh_actions=$(gh_log)
+  assert_not_contains "pr ready" "$gh_actions" "manual draft survives a no-op run"
+
+  reset_gh
+  GH_STUB_STATE=OPEN
+  echo "v3" > "$fixture_upstream/a.txt"
+  upstream_commit "c3"
+  run_sync
+  assert_equals "0" "$status" "clean sync exits 0"
+  gh_actions=$(gh_log)
+  assert_not_contains "pr ready" "$gh_actions" "manual draft survives a clean sync"
+  assert_not_contains "pr create" "$gh_actions" "PR reused, not recreated"
+}
+
+test_new_conflicted_pr_created_draft() {
+  new_fixture "conflicted-create"
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" >> "$fixture_fork/a.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+
+  run_sync
+  gh_actions=$(gh_log)
+  assert_equals "0" "$status" "conflicted first sync exits 0"
+  assert_contains "pr create --draft" "$gh_actions" "conflicted PR created as draft"
+  assert_contains "pr edit sync/upstream --add-label upstream-conflict" "$gh_actions" "conflict label added at create"
+  assert_not_contains "pr ready --undo" "$gh_actions" "fresh create never drafts via ready --undo"
+  assert_contains "pr comment" "$gh_actions" "conflict comment posted"
+}
+
+test_apply_failure_not_misclassified() {
+  new_fixture "apply-failure"
+  git -C "$fixture_fork" rm -q a.txt
+  printf '<<<<<<< HEAD\nexample\n>>>>>>> branch\n' > "$fixture_fork/example-conflict.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local changes"
+  git -C "$fixture_fork" push -q origin main
+  git -C "$fixture_upstream" rm -q a.txt
+  upstream_commit "c2"
+
+  run_sync
+  assert_status_failed "failed apply exits non-zero"
+  assert_contains "could not be applied" "$(sync_err)" "hard failure reported"
+  assert_no_branch "no sync branch pushed"
+}
+
+test_marker_example_outside_change_set() {
+  new_fixture "marker-example"
+  printf '<<<<<<< HEAD\nexample\n>>>>>>> branch\n' > "$fixture_fork/example-conflict.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "docs: conflict marker example"
+  git -C "$fixture_fork" push -q origin main
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+
+  run_sync
+  gh_actions=$(gh_log)
+  assert_equals "0" "$status" "clean sync exits 0"
+  assert_not_contains "pr create --draft" "$gh_actions" "PR created ready"
+  assert_not_contains "pr edit sync/upstream --add-label" "$gh_actions" "no conflict label"
+  assert_not_contains "pr ready --undo" "$gh_actions" "no draft toggling"
+}
+
+test_missing_and_invalid_branch_marker() {
+  new_fixture "branch-marker-errors"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  switch_to_sync_branch
+  git -C "$fixture_fork" rm -q UPSTREAM_SHA
+  commit_on_sync_branch "chore: drop branch marker"
+  run_sync
+  assert_status_failed "missing branch marker fails"
+  assert_contains "has no UPSTREAM_SHA" "$(sync_err)" "missing branch marker reported"
+  assert_contains "chore: drop branch marker" "$(branch_top)" "branch unchanged"
+
+  switch_to_sync_branch
+  echo "0123456789abcdef0123456789abcdef01234567" > "$fixture_fork/UPSTREAM_SHA"
+  commit_on_sync_branch "chore: bad branch marker"
+  run_sync
+  assert_status_failed "invalid branch marker fails"
+  assert_contains "is not a commit" "$(sync_err)" "invalid branch marker reported"
+  assert_contains "chore: bad branch marker" "$(branch_top)" "branch unchanged"
+}
+
+test_remote_advance_rejects_push() {
+  new_fixture "remote-advance"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # Simulate a remote branch that advanced after the sync fetched it. A
+  # pre-push hook pushes a competing commit to origin/sync/upstream just
+  # before the sync pushes, so git rejects the sync's non-fast-forward push.
+  git clone -q "$fixture_dir/origin.git" "$fixture_dir/competing"
+  git -C "$fixture_dir/competing" config user.email o@o
+  git -C "$fixture_dir/competing" config user.name o
+  cat > "$fixture_work/.git/hooks/pre-push" <<EOF
+#!/usr/bin/env bash
+git -C "$fixture_dir/competing" fetch -q origin
+git -C "$fixture_dir/competing" switch -q -C sync/upstream origin/sync/upstream
+echo "competing" > "$fixture_dir/competing/competing.txt"
+git -C "$fixture_dir/competing" add -A
+git -C "$fixture_dir/competing" -c user.name=other -c user.email=o@o commit -qm "chore: competing change"
+git -C "$fixture_dir/competing" push -q origin sync/upstream
+exit 0
+EOF
+  chmod +x "$fixture_work/.git/hooks/pre-push"
+
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+
+  run_sync
+  assert_status_failed "push rejected when remote advanced"
+  assert_contains "rejected" "$(sync_err)" "non-fast-forward rejection reported"
+  assert_not_contains "pr create" "$(gh_log)" "no PR created after failed push"
+}
+
+test_closed_pr_with_live_branch() {
+  new_fixture "closed-pr"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # The PR is closed (stub reports CLOSED) but the branch is live. A new
+  # upstream commit opens a fresh PR against the same branch.
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+
+  run_sync
+  assert_equals "0" "$status" "second sync exits 0"
+  gh_actions=$(gh_log)
+  assert_contains "pr create" "$gh_actions" "new PR created for closed PR"
+  assert_equals "2" "$(grep -c 'chore(upstream)' <<< "$(branch_log)")" "two sync commits appended"
+}
+
+test_gh_create_failure_aborts() {
+  new_fixture "gh-create-fail"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  export GH_STUB_FAIL='pr create*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "gh pr create failure aborts sync"
+  assert_branch_exists "branch pushed before create failure"
+}
+
+test_gh_edit_failure_aborts() {
+  new_fixture "gh-edit-fail"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=OPEN
+  export GH_STUB_FAIL='pr edit*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "gh pr edit failure aborts sync"
+  assert_contains "sync freebuff" "$(branch_top)" "branch appended before edit failure"
+}
+
+test_draft_state_failures_tolerated() {
+  new_fixture "draft-fail"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # A no-op run with an open, labeled PR would mark it ready. If the
+  # draft-state gh calls fail, the sync must still exit 0 (they are masked).
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_LABELS='upstream-conflict'
+  export GH_STUB_FAIL='pr ready*,pr edit*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_equals "0" "$status" "draft-state gh failures tolerated"
+}
+
+test_missing_version_file_fails() {
+  new_fixture "missing-version"
+  git -C "$fixture_upstream" rm -q freebuff/cli/release/package.json
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_status_failed "missing version file fails"
+  assert_not_contains "could not be applied" "$(sync_err)" "apply succeeded before version read"
+  assert_no_branch "no branch pushed"
+}
+
+test_invalid_version_json_fails() {
+  new_fixture "invalid-version"
+  printf 'not-json' > "$fixture_upstream/freebuff/cli/release/package.json"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_status_failed "invalid version JSON fails"
+  assert_not_contains "could not be applied" "$(sync_err)" "apply succeeded before version read"
+  assert_no_branch "no branch pushed"
+}
+
+run_all_tests() {
+  local tests=(
+    test_already_up_to_date
+    test_clean_upstream_update
+    test_conflict_then_resolution
+    test_excluded_only_change_advances_marker
+    test_existing_branch_appends
+    test_manual_edits_preserved
+    test_missing_and_invalid_marker
+    test_upstream_branch_lookup_failure
+    test_version_from_synced_tree
+    test_filenames_with_spaces
+    test_missing_token_in_ci_mode
+    test_open_pr_title_advances
+    test_manual_draft_left_alone
+    test_new_conflicted_pr_created_draft
+    test_apply_failure_not_misclassified
+    test_marker_example_outside_change_set
+    test_missing_and_invalid_branch_marker
+    test_remote_advance_rejects_push
+    test_closed_pr_with_live_branch
+    test_gh_create_failure_aborts
+    test_gh_edit_failure_aborts
+    test_draft_state_failures_tolerated
+    test_missing_version_file_fails
+    test_invalid_version_json_fails
+  )
+  local test_fn
+  for test_fn in "${tests[@]}"; do
+    echo "== $test_fn"
+    "$test_fn"
+  done
+}
+
+run_all_tests
+
+echo
+echo "PASS: $pass_count  FAIL: $fail_count"
+if [[ "$fail_count" -gt 0 ]]; then
+  exit 1
+fi
+echo "All upstream sync tests passed."
