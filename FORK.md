@@ -27,10 +27,12 @@ repository.
 
 The workflow `sync-upstream.yml` keeps the fork up to date. It runs every
 15 minutes, after every push to `main`, and when triggered manually, and
-checks the upstream mirror for new commits. When it finds new commits, it opens or updates a pull request on
-the branch `sync/upstream`. A sync merge does not re-trigger a sync: the
-marker advances with the sync, so the immediate check after a sync merge is a
-no-op.
+checks the upstream mirror for new commits. When it finds new commits, it
+opens or updates a pull request on the branch `sync/upstream`.
+
+Merging a sync pull request triggers the workflow, because the merge pushes
+to `main`. The initial check finds that the marker matches upstream, so the
+sync step does not run.
 
 The sync compares against a marker. The file `UPSTREAM_SHA` records the
 upstream commit the fork last examined. The file `UPSTREAM_VERSION` records
