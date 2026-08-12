@@ -76,7 +76,9 @@ pull request cannot be left as a draft silently.
 
 The upstream sync script has automated integration tests
 (`.github/scripts/sync-upstream_test.sh`). They run in CI on every pull
-request and on every push to `main`.
+request and on every push to `main`. To run a subset, set `TESTS` to a
+space- or comma-separated list of test function names. Without it, the
+suite runs every test.
 
 The sync uses a plain fast-forward push. When `sync/upstream` already
 exists, the sync checks out its tip, applies only the upstream delta since

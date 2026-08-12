@@ -164,8 +164,9 @@ EOF
     notice_id=${notice_ids%%$'\n'*}
     # One bullet per file with a code span: a space-joined list would make
     # filenames that contain spaces ambiguous.
-    # shellcheck disable=SC2016 # the backticks in sed are literal text
-    notice_files=$(conflicted_files "$ref" | sed 's|^|- `|; s|$|`|')
+    notice_files=$(conflicted_files "$ref" | while IFS= read -r f; do
+      printf -- '- \140%s\140\n' "$f"
+    done)
     notice_body=$(printf '%s\n⚠️ Sync has conflicts in:\n%s\nThe pull request is a draft and stays a draft until the conflicts are resolved.\n' \
       "$notice_marker" "$notice_files")
     if [[ -n "$notice_id" ]]; then
