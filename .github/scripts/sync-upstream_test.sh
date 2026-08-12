@@ -497,6 +497,29 @@ test_filenames_with_spaces() {
   assert_equals "spaced content" "$(branch_file "file with spaces.txt")" "spaced filename applied"
 }
 
+test_conflict_notice_lists_files_as_bullets() {
+  new_fixture "notice-bullets"
+  # The fork and upstream both change a file whose name contains spaces, so
+  # the sync conflicts on it. The notice must list the path as one bullet
+  # with a code span, not a flattened ambiguous string.
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" > "$fixture_fork/file with spaces.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "upstream" > "$fixture_upstream/file with spaces.txt"
+  upstream_commit "c2"
+
+  run_sync
+  assert_equals "0" "$status" "conflicted sync exits 0"
+  assert_contains "Applied with conflicts in:" "$(sync_out)" "conflict apply logged"
+  gh_actions=$(gh_log)
+  assert_contains "pr comment" "$gh_actions" "conflict notice posted"
+  # shellcheck disable=SC2016 # the backticks are literal pattern text
+  assert_contains '- `file with spaces.txt`' "$gh_actions" "notice lists the spaced filename as one bullet"
+  assert_contains "file with spaces.txt" "$(sync_out)" "spaced filename kept intact in the log"
+}
+
 test_missing_token_in_ci_mode() {
   new_fixture "missing-token"
   echo "v2" > "$fixture_upstream/a.txt"
@@ -1063,6 +1086,7 @@ run_all_tests() {
     test_new_conflicted_pr_created_draft
     test_apply_failure_not_misclassified
     test_marker_example_outside_change_set
+    test_conflict_notice_lists_files_as_bullets
     test_missing_and_invalid_branch_marker
     test_remote_advance_rejects_push
     test_closed_pr_with_live_branch

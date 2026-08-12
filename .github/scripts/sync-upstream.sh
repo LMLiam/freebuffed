@@ -159,9 +159,11 @@ EOF
       exit 1
     fi
     notice_id=${notice_ids%%$'\n'*}
-    notice_files=$(conflicted_files "$ref" | tr '\n' ' ')
-    notice_files=${notice_files% }
-    notice_body=$(printf '%s\n⚠️ Sync has conflicts in: %s. The pull request is a draft and stays a draft until the conflicts are resolved.\n' \
+    # One bullet per file with a code span: a space-joined list would make
+    # filenames that contain spaces ambiguous.
+    # shellcheck disable=SC2016 # the backticks in sed are literal text
+    notice_files=$(conflicted_files "$ref" | sed 's|^|- `|; s|$|`|')
+    notice_body=$(printf '%s\n⚠️ Sync has conflicts in:\n%s\nThe pull request is a draft and stays a draft until the conflicts are resolved.\n' \
       "$notice_marker" "$notice_files")
     if [[ -n "$notice_id" ]]; then
       gh api -X PATCH "repos/$REPO/issues/comments/$notice_id" -f body="$notice_body"
@@ -269,7 +271,6 @@ fi
 git diff --full-index "$marker" "$upstream_sha" -- . \
   "${EXCLUDES[@]}" > "$patch_file"
 
-conflicts=""
 if [[ -s "$patch_file" ]]; then
   if git apply --3way "$patch_file"; then
     echo "Applied cleanly."
@@ -282,8 +283,10 @@ if [[ -s "$patch_file" ]]; then
       echo "::error::Upstream changes could not be applied and no conflict was produced. Inspect ${patch_file}." >&2
       exit 1
     fi
-    conflicts="${unmerged[*]}"
-    echo "Applied with conflicts in: ${conflicts}"
+    # One path per line: a space-joined string would make filenames that
+    # contain spaces ambiguous in the log.
+    echo "Applied with conflicts in:"
+    printf '  %s\n' "${unmerged[@]}"
   fi
 else
   echo "Upstream changed only fork-local paths — advancing the marker only."
