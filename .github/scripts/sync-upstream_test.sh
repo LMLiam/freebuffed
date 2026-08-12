@@ -773,6 +773,28 @@ test_ready_failure_reconciled() {
   assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "label removed after ready"
 }
 
+test_labels_read_failure_aborts() {
+  new_fixture "labels-read-fail"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # A failed labels read must not be treated as "no label": that would
+  # drop the label from a still-drafted pull request. The run fails loudly.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_LABELS='upstream-conflict'
+  GH_STUB_DRAFT=true
+  export GH_STUB_FAIL='pr view sync/upstream --json labels*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "labels read failure fails the sync"
+  assert_contains "could not read labels" "$(sync_err)" "labels read failure reported"
+  assert_not_contains "pr edit sync/upstream --remove-label" "$(gh_log)" "label not removed on failed read"
+}
+
 test_comment_failure_reconciled() {
   new_fixture "comment-recovery"
   git -C "$fixture_fork" switch -q main
@@ -878,6 +900,7 @@ run_all_tests() {
     test_title_reconciled_after_failure
     test_label_failure_reconciled
     test_ready_failure_reconciled
+    test_labels_read_failure_aborts
     test_comment_failure_reconciled
     test_missing_conflict_label_fails
     test_conflict_label_failure_aborts

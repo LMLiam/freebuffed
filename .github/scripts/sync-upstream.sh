@@ -72,7 +72,7 @@ ensure_conflict_label() {
 # the branch itself, so a stale title is repaired even when main lags.
 reconcile_pr() {
   local ref="$1"
-  local version title state is_draft
+  local version title state is_draft pr_labels
   version=$(git show "$ref:UPSTREAM_VERSION" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
   title="chore(upstream): sync freebuff ${version}"
   state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null || true)
@@ -119,7 +119,17 @@ EOF
       gh pr comment "$SYNC_BRANCH" --body \
         "⚠️ Sync has conflicts in: $(conflicted_files "$ref" | tr '\n' ' '). The pull request is a draft and stays a draft until the conflicts are resolved."
     fi
-  elif gh pr view "$SYNC_BRANCH" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "$CONFLICT_LABEL"; then
+    return 0
+  fi
+
+  # Clean. The label marks an automatically drafted pull request. Read it
+  # loudly: a failed read must not be treated as "no label", which would
+  # drop the label from a still-drafted pull request.
+  if ! pr_labels=$(gh pr view "$SYNC_BRANCH" --json labels --jq '.labels[].name' 2>/dev/null); then
+    echo "::error::could not read labels for $SYNC_BRANCH" >&2
+    exit 1
+  fi
+  if grep -qx "$CONFLICT_LABEL" <<< "$pr_labels"; then
     # Clean again. Mark the auto-drafted pull request ready, then drop the
     # label so a manual draft is never forced ready by a later run. A failure
     # here aborts the sync and is retried on the next run.
