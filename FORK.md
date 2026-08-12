@@ -48,9 +48,12 @@ The sync preserves fork-local files. A sync never touches these paths:
 
 When upstream changes a file that the fork also changed, the sync applies
 with a three-way merge and leaves conflict markers in that file. The sync
-still opens or updates the pull request, with the conflicts visible in the
-diff and listed in a comment. Resolve the markers in the pull request, push
-a follow-up commit, then merge.
+still opens or updates the pull request as a draft, with the conflicts
+visible in the diff and listed in a comment. The required `Conflict markers`
+check fails while any changed file contains unresolved markers, so a
+conflicted sync cannot be merged by accident. Resolve the markers in the
+pull request and push a follow-up commit; the next sync run marks it ready
+once it is clean.
 
 The sync never overwrites manual changes on the `sync/upstream` branch. If
 the branch has a commit that the bot did not create, the sync pauses and

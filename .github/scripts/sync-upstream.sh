@@ -79,6 +79,11 @@ if [[ -n "$remote_tip" ]]; then
         gh pr comment "$SYNC_BRANCH" --body "The bot paused: $SYNC_BRANCH has manual changes and will not be overwritten. Merge the pull request when ready — the next sync resumes once the marker advances."
       fi
     fi
+    if git grep -lE '^(<<<<<<< |>>>>>>> )' "$remote_tip" -- . "${EXCLUDES[@]}" >/dev/null 2>&1; then
+      gh pr ready --undo "$SYNC_BRANCH" 2>/dev/null || true
+    else
+      gh pr ready "$SYNC_BRANCH" 2>/dev/null || true
+    fi
     exit 0
   fi
 fi
@@ -132,7 +137,10 @@ EOF
 fi
 
 if [[ -n "$conflicts" ]]; then
+  gh pr ready --undo "$SYNC_BRANCH" 2>/dev/null || true
   if ! gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "Sync has conflicts"; then
-    gh pr comment "$SYNC_BRANCH" --body "⚠️ Sync has conflicts in: ${conflicts}. Resolve the conflict markers in this pull request, then push a follow-up commit."
+    gh pr comment "$SYNC_BRANCH" --body "⚠️ Sync has conflicts in: ${conflicts}. The pull request is a draft and the Conflict markers check blocks merging until they are resolved."
   fi
+else
+  gh pr ready "$SYNC_BRANCH" 2>/dev/null || true
 fi

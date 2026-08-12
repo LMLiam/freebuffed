@@ -49,3 +49,38 @@ jobs:
           done < commit-shas.txt > commit-subjects.txt
       - name: Validate commit subjects
         run: bash .github/scripts/validate-conventional-title.sh --stdin < commit-subjects.txt
+
+  conflict-markers:
+    name: Conflict markers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      # Committed conflict markers are not a git conflict, so GitHub still
+      # treats the pull request as mergeable. Fail instead if any changed
+      # file contains unresolved markers.
+      - name: Fail on unresolved conflict markers in changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD)
+          if [[ -z "$changed" ]]; then
+            echo "No changed files."
+            exit 0
+          fi
+          found=""
+          while IFS= read -r file; do
+            if hits=$(grep -nI -E '^(<<<<<<< |>>>>>>> )' "$file" 2>/dev/null); then
+              found+="${file}:${hits}"$'\n'
+            fi
+          done <<< "$changed"
+          if [[ -n "$found" ]]; then
+            echo "::error::Unresolved conflict markers in changed files:"
+            printf '%s' "$found"
+            exit 1
+          fi
+          echo "No conflict markers in changed files."
