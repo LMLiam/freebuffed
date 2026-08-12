@@ -131,14 +131,15 @@ else
   echo "Upstream changed only fork-local paths — advancing the marker only."
 fi
 
-# Advance the markers.
+# Advance the markers. The version is read from the synced tree itself, so
+# the markers are deterministic: the npm registry can lag or race the mirror.
 echo "$upstream_sha" > UPSTREAM_SHA
-npm_version=$(curl -s https://registry.npmjs.org/freebuff/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
-echo "$npm_version" > UPSTREAM_VERSION
+upstream_version=$(git show "$upstream_sha:freebuff/cli/release/package.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+echo "$upstream_version" > UPSTREAM_VERSION
 
 git add -A
 git -c user.name="$COMMIT_NAME" -c user.email="$COMMIT_EMAIL" \
-  commit -m "chore(upstream): sync freebuff ${npm_version}"
+  commit -m "chore(upstream): sync freebuff ${upstream_version}"
 
 # Push. In CI the push uses SYNC_TOKEN, passed as an ephemeral credential to
 # this one command — nothing is written to the repository's git config. A
@@ -159,7 +160,7 @@ else
   cat > "$BODY_FILE" <<'EOF'
 Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
 EOF
-  gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${npm_version}" --body-file "$BODY_FILE"
+  gh pr create --base main --head "$SYNC_BRANCH" --title "chore(upstream): sync freebuff ${upstream_version}" --body-file "$BODY_FILE"
 fi
 
 if [[ -n "$conflicts" ]]; then
