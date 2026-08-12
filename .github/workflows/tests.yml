@@ -90,6 +90,17 @@ jobs:
       - name: Run agents tests
         run: bun run --cwd agents test
 
+  upstream-sync:
+    name: Tests (upstream sync)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run upstream sync tests
+        run: bash .github/scripts/sync-upstream_test.sh
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
