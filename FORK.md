@@ -45,12 +45,14 @@ The sync preserves fork-local files. A sync never touches these paths:
 - `UPSTREAM_VERSION` and `UPSTREAM_SHA`
 - `release-please-config.json` and `.release-please-manifest.json`
 - `CHANGELOG.md`
-- `scripts/sync-upstream.sh`
+- `scripts/sync-upstream.sh` and `scripts/upstream-sync-check.sh`
 
-When upstream changes a file that the fork also changed, the sync cannot
-apply automatically. The workflow stops and reports the conflict. Resolve it
-manually with `bash scripts/sync-upstream.sh`, then push to `sync/upstream`.
-The pull request then shows the resolved result.
+When upstream changes a file that the fork also changed, the sync applies
+with a three-way merge and leaves conflict markers in that file. The sync
+still opens or updates the pull request, with the conflicts visible in the
+diff and listed in a comment. Resolve the markers in the pull request, push
+a follow-up commit, then merge. For large conflicts you can run the same
+flow locally with `bash scripts/sync-upstream.sh`.
 
 The sync needs the secret `SYNC_TOKEN` (a fine-grained token with Contents
 and Pull requests write access on this repository). Without it, the workflow
