@@ -1,0 +1,51 @@
+name: PR
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: Title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate pull request title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: bash .github/scripts/validate-conventional-title.sh "$PR_TITLE"
+
+  commits:
+    name: Commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Collect commit subjects
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMITS_URL: ${{ github.event.pull_request.commits_url }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # Validate only commits that are not already on the base branch. The
+        # fork's main contains upstream mirror sync commits, which are not
+        # conventional; ancestry, not the subject, identifies them.
+        run: |
+          gh api --paginate "$COMMITS_URL" --jq '.[].sha' > commit-shas.txt
+          while read -r sha; do
+            if git merge-base --is-ancestor "$sha" "$BASE_SHA"; then
+              continue
+            fi
+            git log -1 --format=%s "$sha"
+          done < commit-shas.txt > commit-subjects.txt
+      - name: Validate commit subjects
+        run: bash .github/scripts/validate-conventional-title.sh --stdin < commit-subjects.txt

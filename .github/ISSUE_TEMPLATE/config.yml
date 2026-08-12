@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Upstream Freebuff
+    url: https://github.com/CodebuffAI/freebuff/issues
+    about: For issues that belong in the official project, report them upstream.

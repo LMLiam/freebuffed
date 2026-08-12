@@ -1,0 +1,81 @@
+# freerebuff
+
+## Purpose
+
+This repository is a fork of the Freebuff CLI. The Freebuff CLI is the
+Codebuff CLI compiled with the flag `FREEBUFF_MODE=true`.
+
+The fork provides a better Freebuff. It includes our own features and it
+includes upstream pull requests that the upstream team has not yet merged.
+
+## Relationship with upstream
+
+The upstream repository is a public mirror of a private source tree. The
+upstream team ports accepted public contributions into the private tree. They
+then export the tree back to the public mirror as "Sync public snapshot"
+commits.
+
+This fork tracks the upstream `main` branch. It adds our own changes on top.
+We also merge useful upstream pull requests that are still open.
+
+We send our changes back upstream as pull requests against the upstream
+repository.
+
+## Licensing and builds
+
+The whole codebase is licensed under the Apache License 2.0. See the file
+[LICENSE](LICENSE). The file [NOTICE](NOTICE) credits the upstream authors.
+You must preserve both files in any redistribution.
+
+**Trademarks.** The Apache License does not grant trademark rights. We do not
+ship under the names "Freebuff" or "Codebuff". We do not use their artwork.
+This project is `freerebuff`. It is a separate project. Do not present it as
+the official product.
+
+### Releases
+
+Release-please tags releases on `main` with this repository's own semver
+version. The `Release artifacts` workflow builds native binaries and attaches
+them to the release.
+
+The file `UPSTREAM_VERSION` records the Freebuff version that the current
+snapshot is based on. Update it on each sync from upstream.
+
+The release version combines the two. The binary reports
+`<tag>+freebuff.<upstream>` (for example `1.2.3+freebuff.0.0.146`). Release
+assets are named `freerebuff-<tag>-freebuff-<upstream>-<platform>-<arch>`.
+
+We do not publish to npm yet. We may publish under a distinct package name in
+the future.
+
+### Build from source
+
+Requirements:
+
+- [bun](https://bun.sh), version per [.bun-version](.bun-version).
+
+Commands:
+
+```bash
+bun install --frozen-lockfile
+bun run build:sdk
+FREEBUFF_MODE=true bun cli/scripts/build-binary.ts freerebuff <version>
+```
+
+The command produces the file `cli/bin/freerebuff`.
+
+## Known upstream mirror gaps
+
+The public mirror excludes internal code. The directory `packages/internal`
+is absent. It contains environment and secret-management helpers. The upstream
+team excludes it by design. See [their
+CONTRIBUTING.md](https://github.com/CodebuffAI/freebuff/blob/main/CONTRIBUTING.md).
+
+The cli unit-test suite imports `packages/internal` at module scope. It cannot
+start from a fresh mirror checkout. The fork CI does not run the cli suite.
+
+We restored two files that mirror syncs dropped while the code still
+references them:
+
+- `test/setup-scm-loader.ts`
+- `agents-graveyard/researcher/researcher.ts`

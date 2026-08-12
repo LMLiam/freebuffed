@@ -1,0 +1,33 @@
+"area: cli":
+  - changed-files:
+      - any-glob-to-any-file: "cli/**"
+
+"area: sdk":
+  - changed-files:
+      - any-glob-to-any-file: "sdk/**"
+
+"area: core":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packages/**"
+          - "common/**"
+
+"area: freebuff":
+  - changed-files:
+      - any-glob-to-any-file: "freebuff/**"
+
+"area: agents":
+  - changed-files:
+      - any-glob-to-any-file: "agents/**"
+
+"area: evals":
+  - changed-files:
+      - any-glob-to-any-file: "evals/**"
+
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file: ".github/workflows/**"
+
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file: "**/*.md"
