@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug in freerebuff
+description: Report a bug in freebuffed
 labels: ["type: bug"]
 body:
   - type: markdown
@@ -30,7 +30,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `freerebuff --version`
+      description: Output of `freebuffed --version`
     validations:
       required: true
   - type: textarea

@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement to freerebuff
+description: Suggest an improvement to freebuffed
 labels: ["type: feature"]
 body:
   - type: markdown

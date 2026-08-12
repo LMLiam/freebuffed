@@ -1,4 +1,4 @@
-# freerebuff
+# freebuffed
 
 ## Purpose
 
@@ -7,6 +7,8 @@ Codebuff CLI compiled with the flag `FREEBUFF_MODE=true`.
 
 The fork provides a better Freebuff. It includes our own features and it
 includes upstream pull requests that the upstream team has not yet merged.
+
+The name plays on "Freebuff": buffed, and free.
 
 ## Relationship with upstream
 
@@ -21,6 +23,8 @@ We also merge useful upstream pull requests that are still open.
 We send our changes back upstream as pull requests against the upstream
 repository.
 
+The root `README.md` is fork-specific. Preserve it across syncs from upstream.
+
 ## Licensing and builds
 
 The whole codebase is licensed under the Apache License 2.0. See the file
@@ -29,7 +33,7 @@ You must preserve both files in any redistribution.
 
 **Trademarks.** The Apache License does not grant trademark rights. We do not
 ship under the names "Freebuff" or "Codebuff". We do not use their artwork.
-This project is `freerebuff`. It is a separate project. Do not present it as
+This project is `freebuffed`. It is a separate project. Do not present it as
 the official product.
 
 ### Releases
@@ -48,7 +52,7 @@ snapshot is based on. Update it on each sync from upstream.
 
 The release version combines the two. The binary reports
 `<tag>+freebuff.<upstream>` (for example `1.2.3+freebuff.0.0.146`). Release
-assets are named `freerebuff-<tag>-freebuff-<upstream>-<platform>-<arch>`.
+assets are named `freebuffed-<tag>-freebuff-<upstream>-<platform>-<arch>`.
 
 We do not publish to npm yet. We may publish under a distinct package name in
 the future.
@@ -64,10 +68,10 @@ Commands:
 ```bash
 bun install --frozen-lockfile
 bun run build:sdk
-FREEBUFF_MODE=true bun cli/scripts/build-binary.ts freerebuff <version>
+FREEBUFF_MODE=true bun cli/scripts/build-binary.ts freebuffed <version>
 ```
 
-The command produces the file `cli/bin/freerebuff`.
+The command produces the file `cli/bin/freebuffed`.
 
 ## Known upstream mirror gaps
 
