@@ -34,9 +34,14 @@ the official product.
 
 ### Releases
 
-Release-please tags releases on `main` with this repository's own semver
-version. The `Release artifacts` workflow builds native binaries and attaches
-them to the release.
+Release-please opens a release pull request for every conventional commit on
+`main`. While the version is below 1.0.0, `feat` and breaking changes bump
+the minor version; every other type bumps the patch version. After 1.0.0,
+breaking changes bump the major version. The `Release artifacts` workflow
+then builds native binaries and attaches them to the release.
+
+When you sync from upstream, record the sync as a conventional commit (for
+example `chore(upstream): sync freebuff <version>`).
 
 The file `UPSTREAM_VERSION` records the Freebuff version that the current
 snapshot is based on. Update it on each sync from upstream.

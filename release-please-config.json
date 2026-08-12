@@ -24,8 +24,7 @@
     },
     {
       "type": "test",
-      "section": "🧪 Tests",
-      "hidden": true
+      "section": "🧪 Tests"
     },
     {
       "type": "docs",
@@ -33,18 +32,15 @@
     },
     {
       "type": "chore",
-      "section": "🔨 Chores & CI",
-      "hidden": true
+      "section": "🔨 Chores & CI"
     },
     {
       "type": "build",
-      "section": "🏗️ Build System",
-      "hidden": true
+      "section": "🏗️ Build System"
     },
     {
       "type": "ci",
-      "section": "🤖 CI",
-      "hidden": true
+      "section": "🤖 CI"
     }
   ],
   "packages": {
