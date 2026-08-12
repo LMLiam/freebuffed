@@ -69,10 +69,6 @@ if [[ ! -s /tmp/upstream-sync.patch ]]; then
   exit 0
 fi
 
-# Never overwrite manual changes on the sync branch. If the branch's tip is
-# not the bot's own commit, a human is working on the pull request — stop and
-# wait. The marker advances when the pull request merges, so the sync resumes
-# cleanly from there.
 remote_tip=$(git ls-remote origin "refs/heads/$SYNC_BRANCH" | awk '{print $1}')
 if [[ -n "$remote_tip" ]]; then
   tip_name=$(git log -1 --format='%cn' "$remote_tip" 2>/dev/null || true)
