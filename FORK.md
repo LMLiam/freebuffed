@@ -26,7 +26,7 @@ repository.
 ### Syncing from upstream
 
 The workflow `sync-upstream.yml` keeps the fork up to date. It runs every 15
-minutes and after every merge to `main`, and checks the upstream mirror for
+minutes and after every push to `main`, and checks the upstream mirror for
 new commits. When it finds new commits, it opens or updates a pull request on
 the branch `sync/upstream`. A sync merge does not re-trigger a sync: the
 marker advances with the sync, so the immediate check after a sync merge is a
@@ -34,40 +34,44 @@ no-op.
 
 The sync compares against a marker. The file `UPSTREAM_SHA` records the
 upstream commit the fork last examined. The file `UPSTREAM_VERSION` records
-the Freebuff version at that point, read from the synced commit's
-`freebuff/cli/release/package.json` so it always matches the tree. The marker
-always advances: when upstream changed only fork-local paths, the sync
-pushes a marker-only commit instead of a content sync, so the marker keeps
-its meaning and no-op runs stay cheap.
+the Freebuff version at that point. The sync reads it from the synced
+commit's `freebuff/cli/release/package.json`, so it matches the tree. The
+marker advances on every successful sync: when upstream changed only
+fork-local paths, the sync pushes a marker-only commit instead of a content
+sync, so the marker continues to identify the upstream commit last examined,
+and unchanged runs perform only the upstream check.
 
-The sync preserves fork-local files. A sync never touches these paths:
+The sync preserves fork-local files. The sync does not import upstream
+changes to these paths:
 
 - `.github/`
 - `.coderabbit.yaml`
 - `FORK.md`
 - `README.md` and `README.zh-CN.md`
-- `UPSTREAM_VERSION` and `UPSTREAM_SHA`
 - `release-please-config.json` and `.release-please-manifest.json`
 - `CHANGELOG.md`
+
+The sync manages `UPSTREAM_SHA` and `UPSTREAM_VERSION` itself. It rewrites
+both files when it advances the marker, so it never imports upstream
+changes to them.
 
 When upstream changes a file that the fork also changed, the sync applies
 with a three-way merge and leaves conflict markers in that file. The sync
 still opens or updates the pull request as a draft, with the conflicts
-visible in the diff and listed in a comment. The required `Conflict markers`
-check fails while any changed file contains unresolved markers, so a
-conflicted sync cannot be merged by accident. Resolve the markers in the
-pull request and push a follow-up commit; the next sync run marks it ready
-once it is clean.
+visible in the diff and listed in a comment. The `Conflict markers` check
+fails while any changed file contains unresolved markers. Resolve the
+markers and push a follow-up commit. The next sync run marks the pull
+request ready once it is clean.
 
-The sync machinery is covered by an automated test suite
-(`.github/scripts/test-sync-upstream.sh`) that exercises the script against
-throwaway local git repositories. It runs in CI on every pull request.
+The upstream sync script has automated integration tests
+(`.github/scripts/sync-upstream_test.sh`). They run in CI on every pull
+request and on every push to `main`.
 
-The sync never force-pushes. When `sync/upstream` already exists, the sync
-checks out its tip, applies only the upstream delta since that branch's own
-marker, and appends a new commit with a plain fast-forward push. A plain
-push cannot overwrite the remote tip, so manual commits on the branch are
-preserved by construction; the pull request is updated in place. If the
+The sync uses a plain fast-forward push. When `sync/upstream` already
+exists, the sync checks out its tip, applies only the upstream delta since
+that branch's own marker, and appends a new commit. Git rejects the push if
+the remote branch changes after the script fetches it, so manual commits on
+the branch are preserved; the pull request is updated in place. If the
 branch is up to date, the run is a no-op.
 
 The sync needs the secret `SYNC_TOKEN` (a fine-grained token with Contents
