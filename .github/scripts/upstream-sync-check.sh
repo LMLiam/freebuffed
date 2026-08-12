@@ -7,7 +7,7 @@
 #   changed, upstream_sha, marker
 #
 # Usage:
-#   bash scripts/upstream-sync-check.sh
+#   bash .github/scripts/upstream-sync-check.sh
 set -euo pipefail
 
 UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/CodebuffAI/freebuff.git}"
