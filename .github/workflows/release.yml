@@ -16,22 +16,22 @@ jobs:
         include:
           - os: ubuntu-latest
             name: freebuffed-linux-x64
-            target: linux-x64
+            target: bun-linux-x64
             platform: linux
             arch: x64
           - os: ubuntu-24.04-arm
             name: freebuffed-linux-arm64
-            target: linux-arm64
+            target: bun-linux-arm64
             platform: linux
             arch: arm64
           - os: macos-15
             name: freebuffed-darwin-arm64
-            target: darwin-arm64
+            target: bun-darwin-arm64
             platform: darwin
             arch: arm64
           - os: macos-15-intel
             name: freebuffed-darwin-x64
-            target: darwin-x64
+            target: bun-darwin-x64
             platform: darwin
             arch: x64
     runs-on: ${{ matrix.os }}
