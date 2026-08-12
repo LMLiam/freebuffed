@@ -42,7 +42,7 @@ readonly EXCLUDES
 CONFLICT_LABEL="${SYNC_CONFLICT_LABEL:-upstream-conflict}"
 readonly CONFLICT_LABEL
 
-branch_has_conflicts() {
+conflicted_files() {
   local ref="$1"
   local files=()
   local f
@@ -52,7 +52,11 @@ branch_has_conflicts() {
   if [[ ${#files[@]} -eq 0 ]]; then
     return 1
   fi
-  git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" >/dev/null 2>&1
+  git grep -lE '^(<<<<<<< |>>>>>>> )' "$ref" -- "${files[@]/#/:(literal)}" 2>/dev/null
+}
+
+branch_has_conflicts() {
+  conflicted_files "$1" >/dev/null 2>&1
 }
 
 ensure_conflict_label() {
@@ -62,24 +66,60 @@ ensure_conflict_label() {
   fi
 }
 
-create_sync_pr() {
-  if branch_has_conflicts "$2"; then
-    gh pr create --draft --base main --head "$SYNC_BRANCH" \
-      --title "$1" --body-file "$body_file"
-    gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
-  else
-    gh pr create --base main --head "$SYNC_BRANCH" \
-      --title "$1" --body-file "$body_file"
-  fi
-}
+# Reconcile the sync pull request towards its desired state. Both the changed
+# and the unchanged run call this, so a run that fails part-way (for example
+# after the push) converges on the next run. The title and version come from
+# the branch itself, so a stale title is repaired even when main lags.
+reconcile_pr() {
+  local ref="$1"
+  local version title state is_draft
+  version=$(git show "$ref:UPSTREAM_VERSION" 2>/dev/null | tr -d '[:space:]' || echo "unknown")
+  title="chore(upstream): sync freebuff ${version}"
+  state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null || true)
 
-sync_draft_state() {
-  if branch_has_conflicts "$1"; then
-    gh pr ready --undo "$SYNC_BRANCH" 2>/dev/null || true
+  # A merged or closed pull request whose branch has no commits ahead of main
+  # is final; do not recreate it.
+  if [[ "$state" != "OPEN" ]] && [[ "$(git rev-list --count "main..$ref")" -eq 0 ]]; then
+    return 0
+  fi
+
+  # Create the pull request when none is open.
+  if [[ "$state" != "OPEN" ]]; then
+    cat > "$body_file" <<'EOF'
+Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
+EOF
+    if branch_has_conflicts "$ref"; then
+      gh pr create --draft --base main --head "$SYNC_BRANCH" \
+        --title "$title" --body-file "$body_file"
+      gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
+    else
+      gh pr create --base main --head "$SYNC_BRANCH" \
+        --title "$title" --body-file "$body_file"
+    fi
+    state=OPEN
+  else
+    gh pr edit "$SYNC_BRANCH" --title "$title"
+  fi
+
+  is_draft=$(gh pr view "$SYNC_BRANCH" --json isDraft --jq '.isDraft' 2>/dev/null || echo false)
+
+  if branch_has_conflicts "$ref"; then
+    # Keep the pull request drafted and labelled while conflicts remain.
+    if [[ "$is_draft" != "true" ]]; then
+      gh pr ready --undo "$SYNC_BRANCH"
+    fi
     gh pr edit "$SYNC_BRANCH" --add-label "$CONFLICT_LABEL"
-  elif gh pr view "$SYNC_BRANCH" --json labels \
-    --jq '.labels[].name' 2>/dev/null | grep -qx "$CONFLICT_LABEL"; then
-    gh pr ready "$SYNC_BRANCH" 2>/dev/null || true
+    if ! gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "Sync has conflicts"; then
+      gh pr comment "$SYNC_BRANCH" --body \
+        "⚠️ Sync has conflicts in: $(conflicted_files "$ref" | tr '\n' ' '). The pull request is a draft and stays a draft until the conflicts are resolved."
+    fi
+  elif gh pr view "$SYNC_BRANCH" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "$CONFLICT_LABEL"; then
+    # Clean again. Mark the auto-drafted pull request ready, then drop the
+    # label so a manual draft is never forced ready by a later run. A failure
+    # here aborts the sync and is retried on the next run.
+    if [[ "$is_draft" == "true" ]]; then
+      gh pr ready "$SYNC_BRANCH"
+    fi
     gh pr edit "$SYNC_BRANCH" --remove-label "$CONFLICT_LABEL"
   fi
 }
@@ -140,18 +180,7 @@ fi
 if [[ "$upstream_sha" == "$marker" ]]; then
   echo "Up to date (marker ${marker:0:8})"
   if [[ -n "$remote_tip" ]]; then
-    sync_draft_state "origin/$SYNC_BRANCH"
-    # After a sync merge the branch has no commits ahead of main, so a new
-    # pull request would be empty. Only recreate it when the branch is ahead.
-    ahead_count=$(git rev-list --count "main..origin/$SYNC_BRANCH")
-    if [[ "$ahead_count" -gt 0 ]] &&
-      ! gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
-      version=$(tr -d '[:space:]' < UPSTREAM_VERSION 2>/dev/null || echo "unknown")
-      cat > "$body_file" <<'EOF'
-Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
-EOF
-      create_sync_pr "chore(upstream): sync freebuff ${version}" "origin/$SYNC_BRANCH"
-    fi
+    reconcile_pr "origin/$SYNC_BRANCH"
   fi
   exit 0
 fi
@@ -211,22 +240,4 @@ else
   git push origin "$SYNC_BRANCH"
 fi
 
-title="chore(upstream): sync freebuff ${upstream_version}"
-
-if gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null | grep -q OPEN; then
-  echo "Pull request already open; branch updated."
-  gh pr edit "$SYNC_BRANCH" --title "$title"
-  sync_draft_state "$SYNC_BRANCH"
-else
-  cat > "$body_file" <<'EOF'
-Automated sync from the [Freebuff upstream mirror](https://github.com/CodebuffAI/freebuff).
-EOF
-  create_sync_pr "$title" "$SYNC_BRANCH"
-fi
-
-if [[ -n "$conflicts" ]]; then
-  if ! gh pr view "$SYNC_BRANCH" --json comments --jq '.comments[].body' 2>/dev/null | grep -q "Sync has conflicts"; then
-    gh pr comment "$SYNC_BRANCH" --body \
-      "⚠️ Sync has conflicts in: ${conflicts}. The pull request is a draft and stays a draft until the conflicts are resolved."
-  fi
-fi
+reconcile_pr "$SYNC_BRANCH"

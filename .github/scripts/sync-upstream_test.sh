@@ -94,11 +94,15 @@ LOG="${GH_STUB_LOG:?gh stub needs GH_STUB_LOG}"
 printf 'gh %s\n' "$*" >> "$LOG"
 case "${1:-} ${2:-}" in
   "pr view")
-    if [[ "$*" == *"--json labels"* ]]; then
-      printf '%s\n' "${GH_STUB_LABELS:-}"
-    else
-      printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}"
-    fi
+    # Emulate gh pr view --json <fields> --jq <expr> for the queries the
+    # sync script uses: state, isDraft, labels, comments.
+    case "$*" in
+      *"--json labels"*) printf '%s\n' "${GH_STUB_LABELS:-}" ;;
+      *"--json isDraft"*) printf '%s\n' "${GH_STUB_DRAFT:-false}" ;;
+      *"--json comments"*) printf '%s\n' "${GH_STUB_COMMENTS:-}" ;;
+      *"--json state"*) printf '%s\n' "${GH_STUB_STATE:-CLOSED}" ;;
+      *) printf '{"state":"%s"}\n' "${GH_STUB_STATE:-CLOSED}" ;;
+    esac
     ;;
 esac
 # Simulate a gh failure. GH_STUB_FAIL is a comma-separated list of globs.
@@ -240,6 +244,7 @@ reset_gh() {
   : > "$TEST_ROOT/gh.log"
   GH_STUB_STATE=CLOSED
   GH_STUB_LABELS=''
+  export GH_STUB_DRAFT=false
   unset GH_STUB_FAIL
 }
 
@@ -298,6 +303,7 @@ test_conflict_then_resolution() {
   reset_gh
   GH_STUB_STATE=OPEN
   GH_STUB_LABELS='upstream-conflict'
+  GH_STUB_DRAFT=true
 
   run_sync
   assert_equals "0" "$status" "resolution run exits 0"
@@ -502,6 +508,7 @@ test_new_conflicted_pr_created_draft() {
   git -C "$fixture_fork" push -q origin main
   echo "v2" > "$fixture_upstream/a.txt"
   upstream_commit "c2"
+  GH_STUB_DRAFT=true
 
   run_sync
   gh_actions=$(gh_log)
@@ -680,26 +687,115 @@ test_gh_edit_failure_aborts() {
   assert_contains "sync freebuff" "$(branch_top)" "branch appended before edit failure"
 }
 
-test_draft_toggle_failure_tolerated() {
-  new_fixture "draft-toggle-fail"
+test_title_reconciled_after_failure() {
+  new_fixture "title-recovery"
   echo "upstream file" > "$fixture_upstream/b.txt"
   upstream_commit "c2"
   run_sync
   assert_equals "0" "$status" "first sync exits 0"
 
-  # A no-op run with an open, labelled PR marks it ready and removes the
-  # label. The ready toggle is idempotent, so its failure is tolerated;
-  # the state-bearing label removal must still be attempted.
+  # The version bumps to 0.0.147; the title update fails after the push.
+  printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
   reset_gh
   GH_STUB_STATE=OPEN
-  GH_STUB_LABELS='upstream-conflict'
-  export GH_STUB_FAIL='pr ready*'
+  export GH_STUB_FAIL='pr edit sync/upstream --title*'
 
   run_sync
   unset GH_STUB_FAIL
-  assert_equals "0" "$status" "ready toggle failure tolerated"
+  assert_status_failed "title update failure fails the sync"
+  assert_equals "0.0.147" "$(branch_file UPSTREAM_VERSION)" "marker advanced despite title failure"
+
+  # The next no-op run reconciles the stale title.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  run_sync
+  assert_equals "0" "$status" "no-op run exits 0"
+  assert_contains 'pr edit sync/upstream --title chore\(upstream\): sync freebuff 0\.0\.147' "$(gh_log)" "stale title reconciled"
+}
+
+test_label_failure_reconciled() {
+  new_fixture "label-recovery"
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" >> "$fixture_fork/a.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  export GH_STUB_FAIL='pr edit sync/upstream --add-label*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "label add failure fails the sync"
+  assert_contains "pr create --draft" "$(gh_log)" "conflicted PR created before label failure"
+
+  # The next no-op run retries the label on the draft PR.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  run_sync
+  assert_equals "0" "$status" "recovery run exits 0"
+  assert_contains "pr edit sync/upstream --add-label upstream-conflict" "$(gh_log)" "label added on retry"
+}
+
+test_ready_failure_reconciled() {
+  new_fixture "ready-recovery"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+
+  # A clean, labelled, auto-drafted PR: the ready toggle fails once. The
+  # sync must fail loudly and keep the label so the next run can retry.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_LABELS='upstream-conflict'
+  GH_STUB_DRAFT=true
+  export GH_STUB_FAIL='pr ready sync/upstream'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "ready failure fails the sync"
   gh_actions=$(gh_log)
-  assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "label removal still attempted"
+  assert_not_contains "pr edit sync/upstream --remove-label" "$gh_actions" "label kept for retry"
+
+  # The next no-op run marks it ready and removes the label.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_LABELS='upstream-conflict'
+  GH_STUB_DRAFT=true
+  run_sync
+  assert_equals "0" "$status" "recovery run exits 0"
+  gh_actions=$(gh_log)
+  assert_contains "pr ready sync/upstream" "$gh_actions" "PR marked ready on retry"
+  assert_contains "pr edit sync/upstream --remove-label upstream-conflict" "$gh_actions" "label removed after ready"
+}
+
+test_comment_failure_reconciled() {
+  new_fixture "comment-recovery"
+  git -C "$fixture_fork" switch -q main
+  echo "fork line" >> "$fixture_fork/a.txt"
+  git -C "$fixture_fork" add -A
+  git -C "$fixture_fork" commit -qm "fix: fork-local edit"
+  git -C "$fixture_fork" push -q origin main
+  echo "v2" > "$fixture_upstream/a.txt"
+  upstream_commit "c2"
+  export GH_STUB_FAIL='pr comment*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "comment failure fails the sync"
+  assert_contains "pr create --draft" "$(gh_log)" "conflicted PR created before comment failure"
+
+  # The next no-op run posts the missing conflict notice.
+  reset_gh
+  GH_STUB_STATE=OPEN
+  GH_STUB_DRAFT=true
+  run_sync
+  assert_equals "0" "$status" "recovery run exits 0"
+  assert_contains "pr comment" "$(gh_log)" "conflict notice posted on retry"
 }
 
 test_missing_conflict_label_fails() {
@@ -779,7 +875,10 @@ run_all_tests() {
     test_merged_pr_not_recreated
     test_gh_create_failure_aborts
     test_gh_edit_failure_aborts
-    test_draft_toggle_failure_tolerated
+    test_title_reconciled_after_failure
+    test_label_failure_reconciled
+    test_ready_failure_reconciled
+    test_comment_failure_reconciled
     test_missing_conflict_label_fails
     test_conflict_label_failure_aborts
     test_missing_version_file_fails
