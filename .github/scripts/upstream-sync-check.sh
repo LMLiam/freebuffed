@@ -14,6 +14,10 @@ UPSTREAM_URL="${UPSTREAM_URL:-https://github.com/CodebuffAI/freebuff.git}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 
 upstream_sha=$(git ls-remote "$UPSTREAM_URL" "$UPSTREAM_BRANCH" | awk '{print $1}')
+if [[ -z "$upstream_sha" ]]; then
+  echo "::error::$UPSTREAM_BRANCH not found at $UPSTREAM_URL." >&2
+  exit 1
+fi
 marker=$(tr -d '[:space:]' < UPSTREAM_SHA 2>/dev/null || true)
 
 if [[ -z "$marker" ]]; then
@@ -30,7 +34,9 @@ else
 fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  echo "changed=${changed}" >> "$GITHUB_OUTPUT"
-  echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
-  echo "marker=${marker}" >> "$GITHUB_OUTPUT"
+  {
+    echo "changed=${changed}"
+    echo "upstream_sha=${upstream_sha}"
+    echo "marker=${marker}"
+  } >> "$GITHUB_OUTPUT"
 fi

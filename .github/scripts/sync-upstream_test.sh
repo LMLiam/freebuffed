@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Automated tests for .github/scripts/sync-upstream.sh.
+# Automated tests for the upstream sync scripts:
+# .github/scripts/sync-upstream.sh and .github/scripts/upstream-sync-check.sh.
 #
 # Each test builds its own temporary local repositories (upstream mirror,
 # origin, work checkout) under TEST_ROOT, stubs `gh` so the GitHub CLI
@@ -22,7 +23,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC_SCRIPT="$SCRIPT_DIR/sync-upstream.sh"
-readonly SCRIPT_DIR SYNC_SCRIPT
+CHECKS_SCRIPT="$SCRIPT_DIR/upstream-sync-check.sh"
+readonly SCRIPT_DIR SYNC_SCRIPT CHECKS_SCRIPT
 
 TEST_ROOT="$(mktemp -d)"
 readonly TEST_ROOT
@@ -397,6 +399,21 @@ test_upstream_branch_lookup_failure() {
   assert_not_contains "pr create" "$(gh_log)" "no PR created"
 }
 
+test_check_script_missing_branch() {
+  new_fixture "check-missing-branch"
+  if (
+    cd "$fixture_fork"
+    UPSTREAM_URL="$fixture_dir/upstream.git" UPSTREAM_BRANCH=does-not-exist \
+      bash "$CHECKS_SCRIPT" >"$fixture_dir/check.out" 2>"$fixture_dir/check.err"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status_failed "check fails when the branch lookup is empty"
+  assert_contains "not found" "$(cat "$fixture_dir/check.err")" "missing branch reported"
+}
+
 test_version_from_synced_tree() {
   new_fixture "version-from-tree"
   printf '{"version":"0.0.147"}' > "$fixture_upstream/freebuff/cli/release/package.json"
@@ -716,6 +733,7 @@ run_all_tests() {
     test_manual_edits_preserved
     test_missing_and_invalid_marker
     test_upstream_branch_lookup_failure
+    test_check_script_missing_branch
     test_version_from_synced_tree
     test_filenames_with_spaces
     test_missing_token_in_ci_mode
