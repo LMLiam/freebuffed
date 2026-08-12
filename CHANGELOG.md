@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.2](https://github.com/LMLiam/freebuffed/compare/0.0.1...0.0.2) (2026-08-12)
+
+
+### 🐛 Fixes
+
+* **ci:** use bun targets for release builds ([#6](https://github.com/LMLiam/freebuffed/issues/6)) ([41609d3](https://github.com/LMLiam/freebuffed/commit/41609d3beab68e74a1222ac4a5988bdbb922be1e))
+
 ## 0.0.1 (2026-08-12)
 
 
