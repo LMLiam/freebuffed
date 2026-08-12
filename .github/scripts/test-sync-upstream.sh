@@ -54,9 +54,11 @@ FIXTURE_WORK=
 new_fixture() {
   local dir="$H/$1"
   mkdir -p "$dir"
-  git init -q --bare "$dir/upstream.git"
-  git init -q --bare "$dir/origin.git"
-  git init -q "$dir/upstream"
+  # Pin the default branch so the suite behaves identically on any runner
+  # (GitHub runners default to `master`; many local installs default to `main`).
+  git init -q --bare --initial-branch=main "$dir/upstream.git"
+  git init -q --bare --initial-branch=main "$dir/origin.git"
+  git init -q --initial-branch=main "$dir/upstream"
   git -C "$dir/upstream" config user.email t@t
   git -C "$dir/upstream" config user.name t
   echo "v1" > "$dir/upstream/a.txt"
