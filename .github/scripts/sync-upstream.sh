@@ -89,11 +89,15 @@ EOF
 
 # Push `refspec` to the sync remote. Use the temporary credential helper in
 # GitHub Actions and the configured `origin` remote in local runs.
-# Arguments: the refspec to push and the run temporary directory.
+# Arguments: the refspec, the run temporary directory, and optional Git push
+# options. Keep options separate from the refspec so a lease can protect a
+# branch deletion.
 # Return non-zero when Git cannot complete the push.
 push_sync_ref() {
   local refspec="$1"
   local tmp_dir="$2"
+  shift 2
+  local -a push_options=("$@")
   local askpass_file
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
     if [[ -z "${GH_TOKEN:-}" ]]; then
@@ -106,11 +110,12 @@ push_sync_ref() {
     fi
     if ! GIT_ASKPASS="$askpass_file" GIT_TERMINAL_PROMPT=0 git push \
       "https://github.com/${REPO}.git" \
+      "${push_options[@]}" \
       "$refspec"; then
       return 1
     fi
   else
-    if ! git push origin "$refspec"; then
+    if ! git push origin "${push_options[@]}" "$refspec"; then
       return 1
     fi
   fi
@@ -130,7 +135,8 @@ cleanup_sync_tmp_dir() {
 main() {
   local tmp_dir patch_file body_file
   local branch main_marker upstream_sha remote_tip retire_sync_branch marker
-  local pr_state current_tip upstream_version
+  local pr_state pr_number merged_pr_number current_tip upstream_version
+  local pr_record current_pr_number current_pr_state
   local -a unmerged=()
   local f
 
@@ -178,10 +184,13 @@ main() {
       git checkout -B "$SYNC_BRANCH" main
       marker="$main_marker"
     else
-      if ! pr_state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null); then
-        echo "::error::could not determine pull request state for $SYNC_BRANCH; branch left unchanged" >&2
+      # Query all matching PRs so an empty result means no PR, while a failed
+      # request remains an API error. A branch without an open or merged PR
+      # is not safe to reuse because its commits may have no other copy.
+      if ! pr_record=$(find_sync_pr_state "$SYNC_BRANCH"); then
         return 1
       fi
+      IFS=$'\t' read -r pr_state pr_number <<< "$pr_record"
       case "$pr_state" in
         OPEN)
           echo "Sync branch $SYNC_BRANCH has an open pull request — appending to it (${remote_tip:0:8})."
@@ -198,9 +207,14 @@ main() {
           git checkout -B "$SYNC_BRANCH" main
           marker="$main_marker"
           retire_sync_branch=true
+          merged_pr_number="$pr_number"
           ;;
         CLOSED)
           echo "::error::$SYNC_BRANCH belongs to a closed pull request; reopen it or remove the branch before syncing" >&2
+          return 1
+          ;;
+        NONE)
+          echo "::error::$SYNC_BRANCH has no pull request; create one or remove the branch before syncing" >&2
           return 1
           ;;
         *)
@@ -274,12 +288,17 @@ main() {
       echo "::error::$SYNC_BRANCH changed while the sync was running; branch left unchanged" >&2
       return 1
     fi
-    if ! pr_state=$(gh pr view "$SYNC_BRANCH" --json state --jq '.state' 2>/dev/null) ||
-      [[ "$pr_state" != "MERGED" ]]; then
+    if ! pr_record=$(find_sync_pr_state "$SYNC_BRANCH"); then
+      return 1
+    fi
+    IFS=$'\t' read -r current_pr_state current_pr_number <<< "$pr_record"
+    if [[ "$current_pr_state" != "MERGED" ||
+      "$current_pr_number" != "$merged_pr_number" ]]; then
       echo "::error::pull request state for $SYNC_BRANCH changed before branch retirement; branch left unchanged" >&2
       return 1
     fi
-    if ! push_sync_ref ":$SYNC_BRANCH" "$tmp_dir"; then
+    if ! push_sync_ref ":$SYNC_BRANCH" "$tmp_dir" \
+      "--force-with-lease=refs/heads/$SYNC_BRANCH:$remote_tip"; then
       return 1
     fi
     remote_tip=

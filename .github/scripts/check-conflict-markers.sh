@@ -13,7 +13,7 @@ conflict_marker_files() {
       ":(literal)$file" 2>/dev/null; then
       printf '%s\0' "$file"
     fi
-  done < <(git diff --name-only -z --diff-filter=ACMR "$base_ref" "$head_ref")
+  done < <(git diff --name-only -z --diff-filter=ACMR "$base_ref...$head_ref")
 }
 
 check_conflict_markers() {
@@ -28,7 +28,7 @@ check_conflict_markers() {
 
   while IFS= read -r -d '' file; do
     changed_count=$((changed_count + 1))
-  done < <(git diff --name-only -z --diff-filter=ACMR "$base_ref" "$head_ref")
+  done < <(git diff --name-only -z --diff-filter=ACMR "$base_ref...$head_ref")
 
   if [[ "$changed_count" -eq 0 ]]; then
     echo "No changed files."

@@ -119,14 +119,16 @@ It appends only to an open pull request.
 It preserves manual commits on that branch.
 If the pull request is merged, the sync bases the next branch on current
 `main`.
-It retires the old remote branch.
+It retires the old remote branch with a lease for the observed branch tip.
 It creates `sync/upstream` again after the new commit is ready.
-The sync does not force-push.
+The sync does not force-update a branch without that lease.
 
 If the pull request is closed, the sync fails before it reuses the branch.
+If the branch has no pull request, the sync also fails before it reuses the
+branch.
 If the GitHub API cannot return the pull request state, the sync also fails.
 The sync leaves the remote branch unchanged in both cases.
-Reopen the pull request or remove the branch before the next sync.
+Open a pull request or remove the branch before the next sync.
 If the GitHub API cannot return the open pull-request list after the sync
 commit is pushed, the branch remains available.
 The next run retries the PR update.

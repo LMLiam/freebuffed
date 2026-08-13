@@ -63,6 +63,63 @@ find_open_pr_number() {
   fi
 }
 
+# Classify the pull request history for a retained sync branch. Print
+# `STATE<TAB>NUMBER` for the selected pull request or `NONE` when no pull
+# request exists. A failed request, an unknown state, or multiple open pull
+# requests is an error. Select the newest historical record when no pull
+# request is open so a merged or closed branch cannot be mistaken for a new
+# branch with no pull request.
+find_sync_pr_state() {
+  local sync_branch="$1"
+  local records_output record number state latest_number=0 latest_state=
+  local open_number=
+  local -a records=()
+
+  if ! records_output=$(gh pr list --state all --head "$sync_branch" --base main \
+    --json number,state --jq '.[] | [.number, .state] | @tsv' 2>/dev/null); then
+    echo "::error::could not determine pull request state for $sync_branch; branch left unchanged" >&2
+    return 1
+  fi
+
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    records+=("$record")
+  done <<< "$records_output"
+  if [[ ${#records[@]} -eq 0 ]]; then
+    printf 'NONE\n'
+    return 0
+  fi
+
+  for record in "${records[@]}"; do
+    IFS=$'\t' read -r number state <<< "$record"
+    case "$state" in
+      OPEN)
+        if [[ -n "$open_number" ]]; then
+          echo "::error::found more than one open pull request for $sync_branch" >&2
+          return 1
+        fi
+        open_number="$number"
+        ;;
+      MERGED|CLOSED)
+        ;;
+      *)
+        echo "::error::unexpected pull request state '$state' for $sync_branch; branch left unchanged" >&2
+        return 1
+        ;;
+    esac
+    if [[ "$number" -gt "$latest_number" ]]; then
+      latest_number="$number"
+      latest_state="$state"
+    fi
+  done
+
+  if [[ -n "$open_number" ]]; then
+    printf 'OPEN\t%s\n' "$open_number"
+  else
+    printf '%s\t%s\n' "$latest_state" "$latest_number"
+  fi
+}
+
 # Read the title before editing it. Scheduled runs must not create a write
 # operation when the title already matches the current upstream version.
 ensure_pr_title() {
@@ -156,7 +213,7 @@ escape_conflict_notice_filename() {
   local code control replacement
 
   value="${value//\\/\\\\}"
-  for code in {1..31} 127 {128..159}; do
+  for code in {1..31} 127; do
     printf -v control '%b' "\\$(printf '%03o' "$code")"
     printf -v replacement '\\x%02X' "$code"
     value="${value//"$control"/"$replacement"}"
@@ -273,7 +330,7 @@ reconcile_pr() {
   local sync_branch="$3"
   local repo="$4"
   local conflict_label="$5"
-  local version title open_pr_number is_draft pr_labels
+  local version title open_pr_number commit_count is_draft pr_labels
 
   # Reconcile one candidate ref with its pull request.
   # `ref` is the candidate branch and `body_file` is the temporary PR body.
@@ -289,8 +346,14 @@ reconcile_pr() {
   if ! open_pr_number=$(find_open_pr_number "$sync_branch"); then
     return 1
   fi
-  if [[ -z "$open_pr_number" ]] && [[ "$(git rev-list --count "main..$ref")" -eq 0 ]]; then
-    return 0
+  if [[ -z "$open_pr_number" ]]; then
+    if ! commit_count=$(git rev-list --count "main..$ref" 2>/dev/null); then
+      echo "::error::could not determine whether $ref is ahead of main" >&2
+      return 1
+    fi
+    if [[ "$commit_count" -eq 0 ]]; then
+      return 0
+    fi
   fi
   if [[ -z "$open_pr_number" ]]; then
     if ! create_sync_pr "$ref" "$body_file" "$sync_branch" "$title" "$conflict_label"; then
