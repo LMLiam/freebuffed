@@ -65,6 +65,35 @@ run_check_refs() {
   fi
 }
 
+run_check_with_git_failure() {
+  local failure_mode="$1"
+  local wrapper_dir="$fixture_dir/git-wrapper"
+  local real_git
+
+  mkdir -p "$wrapper_dir"
+  real_git=$(command -v git)
+  cat > "$wrapper_dir/git" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${GIT_FAILURE_MODE:-}" == "diff" && "${1:-}" == "diff" ]]; then
+  exit 2
+fi
+if [[ "${GIT_FAILURE_MODE:-}" == "grep" && "${1:-}" == "grep" ]]; then
+  exit 2
+fi
+exec "$REAL_GIT" "$@"
+BASH
+  chmod +x "$wrapper_dir/git"
+  if output=$(cd "$fixture_dir/repo" && env \
+    PATH="$wrapper_dir:$PATH" REAL_GIT="$real_git" GIT_FAILURE_MODE="$failure_mode" \
+    "$CHECK_SCRIPT" "$base_sha" HEAD 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+}
+
 test_clean_files_pass() {
   new_fixture clean
   printf 'clean\n' > "$fixture_dir/repo/clean.txt"
@@ -161,6 +190,32 @@ test_merge_base_range_ignores_inherited_marker() {
     "merge-base range scans only feature changes"
 }
 
+test_git_diff_failure_fails_closed() {
+  new_fixture diff-failure
+  printf 'clean\n' > "$fixture_dir/repo/clean.txt"
+  commit_head "clean file"
+
+  run_check_with_git_failure diff
+  assert_equals "1" "$status" "git diff failure fails the check"
+  assert_contains "could not read changed files" "$output" \
+    "git diff failure is reported"
+  assert_not_contains "No conflict markers" "$output" \
+    "git diff failure is not reported as clean"
+}
+
+test_git_grep_error_fails_closed() {
+  new_fixture grep-failure
+  printf 'clean\n' > "$fixture_dir/repo/clean.txt"
+  commit_head "clean file"
+
+  run_check_with_git_failure grep
+  assert_equals "1" "$status" "git grep status 2 fails the check"
+  assert_contains "could not scan changed file" "$output" \
+    "git grep error is reported"
+  assert_not_contains "No conflict markers" "$output" \
+    "git grep error is not reported as clean"
+}
+
 run_all_tests() {
   local tests=(
     test_clean_files_pass
@@ -170,6 +225,8 @@ run_all_tests() {
     test_unusual_filename_is_handled
     test_filename_starting_with_dash_is_handled
     test_merge_base_range_ignores_inherited_marker
+    test_git_diff_failure_fails_closed
+    test_git_grep_error_fails_closed
   )
   local test_fn
   for test_fn in "${tests[@]}"; do
