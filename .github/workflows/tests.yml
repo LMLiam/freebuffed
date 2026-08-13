@@ -110,6 +110,8 @@ jobs:
           persist-credentials: false
       - name: Run upstream sync tests
         run: bash .github/scripts/sync-upstream_test.sh
+      - name: Run pull-request contract tests
+        run: python3 -B .github/scripts/sync-upstream-pr_test.py
       - name: Run conflict-marker tests
         run: bash .github/scripts/check-conflict-markers_test.sh
 

@@ -61,6 +61,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Fail on unresolved conflict markers in changed files
+        if: github.event.pull_request.head.ref == 'sync/upstream'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: bash .github/scripts/check-conflict-markers.sh "$BASE_SHA" HEAD
+      - name: Skip conflict-marker scan for other branches
+        if: github.event.pull_request.head.ref != 'sync/upstream'
+        run: echo "Conflict-marker scanning applies only to sync/upstream pull requests."
