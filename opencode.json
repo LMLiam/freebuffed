@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "upstream": {
+      "repository": "CodebuffAI/freebuff",
+      "branch": "main",
+      "description": "Upstream implementation used when auditing syncs and separating fork-local behavior"
+    }
+  }
+}
