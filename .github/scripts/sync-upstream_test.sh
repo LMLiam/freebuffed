@@ -335,7 +335,7 @@ test_body_file_path_with_spaces() {
   body_tmp_dir="$fixture_dir/tmp directory"
   mkdir -p "$body_tmp_dir"
 
-  run_sync_with_env TMPDIR="$body_tmp_dir"
+  run_sync_with_env -u GITHUB_ACTIONS -u GH_TOKEN TMPDIR="$body_tmp_dir"
   assert_equals "0" "$status" "body-file path with spaces succeeds"
 }
 
@@ -953,7 +953,7 @@ exec "$REAL_GIT" "$@"
 BASH
   chmod +x "$git_wrapper_dir/git"
 
-  run_sync_with_env \
+  run_sync_with_env -u GITHUB_ACTIONS -u GH_TOKEN \
     PATH="$git_wrapper_dir:$PATH" \
     REAL_GIT="$real_git" \
     GIT_PUSH_ARGS_FILE="$fixture_dir/git-push-args"
@@ -1459,7 +1459,8 @@ test_special_conflict_label_is_matched_as_data() {
   new_fixture "special-label"
   export GH_STUB_REPO_LABELS_JSON='["label with spaces","label/with%percent","label – unicode"]'
 
-  run_sync_with_env SYNC_CONFLICT_LABEL='label/with%percent'
+  run_sync_with_env -u GITHUB_ACTIONS -u GH_TOKEN \
+    SYNC_CONFLICT_LABEL='label/with%percent'
   unset GH_STUB_REPO_LABELS_JSON
   assert_equals "0" "$status" "special conflict label sync exits 0"
 }
