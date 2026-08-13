@@ -54,7 +54,11 @@ commit_head() {
 }
 
 run_check() {
-  if output=$(cd "$fixture_dir/repo" && "$CHECK_SCRIPT" "$base_sha" HEAD 2>&1); then
+  run_check_refs "$base_sha" HEAD
+}
+
+run_check_refs() {
+  if output=$(cd "$fixture_dir/repo" && "$CHECK_SCRIPT" "$1" "$2" 2>&1); then
     status=0
   else
     status=$?
@@ -132,6 +136,31 @@ test_filename_starting_with_dash_is_handled() {
     "dash filename is reported"
 }
 
+test_merge_base_range_ignores_inherited_marker() {
+  new_fixture merge-base-range
+  git -C "$fixture_dir/repo" switch -q main
+  printf '<<<<<<< inherited\n=======\n>>>>>>> inherited\n' \
+    > "$fixture_dir/repo/inherited-conflict.txt"
+  git -C "$fixture_dir/repo" add inherited-conflict.txt
+  git -C "$fixture_dir/repo" commit -qm "add inherited marker"
+  branch_point=$(git -C "$fixture_dir/repo" rev-parse HEAD)
+
+  git -C "$fixture_dir/repo" switch -q -C feature "$branch_point"
+  git -C "$fixture_dir/repo" switch -q main
+  git -C "$fixture_dir/repo" rm -q inherited-conflict.txt
+  git -C "$fixture_dir/repo" commit -qm "remove inherited marker"
+  main_head=$(git -C "$fixture_dir/repo" rev-parse HEAD)
+
+  git -C "$fixture_dir/repo" switch -q feature
+  printf 'clean feature change\n' > "$fixture_dir/repo/feature.txt"
+  commit_head "clean feature change"
+
+  run_check_refs "$main_head" HEAD
+  assert_equals "0" "$status" "inherited markers outside the PR delta pass"
+  assert_contains "No conflict markers in changed files." "$output" \
+    "merge-base range scans only feature changes"
+}
+
 run_all_tests() {
   local tests=(
     test_clean_files_pass
@@ -140,6 +169,7 @@ run_all_tests() {
     test_empty_diff_passes
     test_unusual_filename_is_handled
     test_filename_starting_with_dash_is_handled
+    test_merge_base_range_ignores_inherited_marker
   )
   local test_fn
   for test_fn in "${tests[@]}"; do

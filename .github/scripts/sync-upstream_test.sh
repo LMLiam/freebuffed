@@ -617,12 +617,15 @@ test_conflict_notice_formats_special_paths() {
   newline_file=$'line\nbreak.txt'
   backtick_file='back`tick.txt'
   tab_file=$'tab\tname.txt'
+  em_dash_file='em—dash.txt'
   commit_on_main_branch "$newline_file" "fork line" "fix: fork-local newline path edit"
   commit_on_main_branch "$backtick_file" "fork line" "fix: fork-local backtick path edit"
   commit_on_main_branch "$tab_file" "fork line" "fix: fork-local tab path edit"
+  commit_on_main_branch "$em_dash_file" "fork line" "fix: fork-local em dash path edit"
   printf 'upstream\n' > "$fixture_upstream/$newline_file"
   printf 'upstream\n' > "$fixture_upstream/$backtick_file"
   printf 'upstream\n' > "$fixture_upstream/$tab_file"
+  printf 'upstream\n' > "$fixture_upstream/$em_dash_file"
   upstream_commit "c2"
 
   run_sync
@@ -643,6 +646,8 @@ PY
     "backtick path uses a safe code span"
   assert_contains_literal "- ${tick}tab\\x09name.txt${tick}" "$notice_body" \
     "tab path is escaped as one notice bullet"
+  assert_contains_literal "- ${tick}em—dash.txt${tick}" "$notice_body" \
+    "UTF-8 path remains readable and unmodified"
   assert_not_contains_literal $'line\nbreak.txt' "$notice_body" \
     "notice does not contain a raw newline path"
 }
@@ -920,6 +925,44 @@ EOF
   assert_not_contains "pr create" "$(gh_log)" "no PR created after failed push"
 }
 
+test_merged_branch_retirement_uses_force_with_lease() {
+  new_fixture "merged-branch-lease"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+  old_tip=$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')
+
+  squash_sync_branch_into_main
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=MERGED
+
+  git_wrapper_dir="$fixture_dir/git-wrapper"
+  mkdir -p "$git_wrapper_dir"
+  real_git=$(command -v git)
+  cat > "$git_wrapper_dir/git" <<'BASH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "push" ]]; then
+  printf '%s\n' "$*" >> "$GIT_PUSH_ARGS_FILE"
+fi
+exec "$REAL_GIT" "$@"
+BASH
+  chmod +x "$git_wrapper_dir/git"
+
+  run_sync_with_env \
+    PATH="$git_wrapper_dir:$PATH" \
+    REAL_GIT="$real_git" \
+    GIT_PUSH_ARGS_FILE="$fixture_dir/git-push-args"
+  assert_equals "0" "$status" "merged branch retirement exits 0"
+  push_args=$(cat "$fixture_dir/git-push-args")
+  assert_contains "push origin --force-with-lease=refs/heads/sync/upstream:$old_tip :sync/upstream" \
+    "$push_args" "merged branch deletion uses the observed tip lease"
+}
+
 test_closed_pr_branch_not_reused() {
   new_fixture "closed-pr"
   echo "upstream file" > "$fixture_upstream/b.txt"
@@ -937,6 +980,45 @@ test_closed_pr_branch_not_reused() {
   assert_equals "$old_tip" \
     "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')" \
     "closed PR branch remains unchanged"
+}
+
+test_missing_pr_state_leaves_branch_unchanged() {
+  new_fixture "missing-pr-state"
+  echo "upstream file" > "$fixture_upstream/b.txt"
+  upstream_commit "c2"
+  run_sync
+  assert_equals "0" "$status" "first sync exits 0"
+  old_tip=$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')
+
+  echo "more" > "$fixture_upstream/c.txt"
+  upstream_commit "c3"
+  reset_gh
+  GH_STUB_STATE=NONE
+
+  run_sync
+  assert_status_failed "missing pull request state stops the sync"
+  assert_contains "has no pull request" "$(sync_err)" \
+    "missing pull request is reported distinctly"
+  assert_equals "$old_tip" \
+    "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')" \
+    "missing pull request leaves the branch unchanged"
+  assert_not_contains "pr create" "$(gh_log)" \
+    "missing pull request does not create a replacement PR"
+
+  reset_gh
+  GH_STUB_STATE=NONE
+  export GH_STUB_FAIL='pr list --state all*'
+
+  run_sync
+  unset GH_STUB_FAIL
+  assert_status_failed "pull request state API failure stops the sync"
+  assert_contains "could not determine pull request state" "$(sync_err)" \
+    "pull request state API failure is reported distinctly"
+  assert_not_contains "has no pull request" "$(sync_err)" \
+    "pull request state API failure is not reported as no PR"
+  assert_equals "$old_tip" \
+    "$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')" \
+    "pull request state API failure leaves the branch unchanged"
 }
 
 test_merged_pr_not_recreated() {
@@ -1043,6 +1125,28 @@ test_merged_pr_uses_current_main_after_rebase_merge() {
   assert_branch_descends_from_main "rebase follow-up uses current main"
   assert_contains "pr create --draft" "$(gh_log)" \
     "rebase follow-up creates a draft conflict PR"
+}
+
+test_reconcile_commit_count_failure_is_reported() {
+  new_fixture "reconcile-commit-count-failure"
+  if (
+    cd "$fixture_work"
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/sync-upstream-pr.sh"
+    reconcile_pr "missing-ref" "$fixture_dir/body.md" "sync/upstream" \
+      "LMLiam/freebuffed" "upstream-conflict" \
+      >"$fixture_dir/reconcile.out" 2>"$fixture_dir/reconcile.err"
+  ); then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status_failed "commit-count failure stops reconciliation"
+  assert_contains "could not determine whether missing-ref is ahead of main" \
+    "$(cat "$fixture_dir/reconcile.err")" \
+    "commit-count failure is reported"
+  assert_not_contains "pr create" "$(gh_log)" \
+    "commit-count failure does not create a PR"
 }
 
 test_reconcile_pr_state_read_failure_does_not_create_duplicate() {
@@ -1274,7 +1378,7 @@ test_state_read_failure_leaves_branch_unchanged() {
   upstream_commit "c3"
   reset_gh
   GH_STUB_STATE=OPEN
-  export GH_STUB_FAIL='pr view sync/upstream --json state*'
+  export GH_STUB_FAIL='pr list --state all*'
   old_tip=$(git -C "$fixture_work" ls-remote origin refs/heads/sync/upstream | awk '{print $1}')
 
   run_sync
@@ -1473,6 +1577,17 @@ notice"
   assert_contains "PATCH" "$(gh_log)" "notice PATCH issued"
   assert_contains "resolved body" \
     "$(cat "$TEST_ROOT/gh-state.json")" "PATCH updates the stored comment body"
+
+  rm -f "$TEST_ROOT/gh-state.json"
+  GH_STUB_STATE=NONE
+  if gh pr view sync/upstream --json state --jq '.state' >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_equals "1" "$status" "stub reports no PR as a failed view"
+  no_pr_list=$(gh pr list --state all --head sync/upstream --json number,state)
+  assert_equals "[]" "$no_pr_list" "stub reports no PR as an empty list"
 }
 
 run_all_tests() {
@@ -1506,11 +1621,14 @@ run_all_tests() {
     test_conflict_notice_formats_special_paths
     test_missing_and_invalid_branch_marker
     test_remote_advance_rejects_push
+    test_merged_branch_retirement_uses_force_with_lease
     test_closed_pr_branch_not_reused
+    test_missing_pr_state_leaves_branch_unchanged
     test_merged_pr_not_recreated
     test_merged_pr_uses_current_main_after_merge_commit
     test_merged_pr_uses_current_main_after_squash_merge
     test_merged_pr_uses_current_main_after_rebase_merge
+    test_reconcile_commit_count_failure_is_reported
     test_reconcile_pr_state_read_failure_does_not_create_duplicate
     test_duplicate_open_pr_lookup_fails
     test_gh_create_failure_aborts

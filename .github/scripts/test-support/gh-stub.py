@@ -129,6 +129,8 @@ if args[0] == "api":
 elif args[0] == "pr":
     sub = args[1] if len(args) > 1 else ""
     if sub == "view":
+        if state["pr"]["state"] == "NONE":
+            sys.exit(1)
         if "--json labels" in cmd_line:
             print("\n".join(state["pr"]["labels"]))
         elif "--json isDraft" in cmd_line:
@@ -146,13 +148,24 @@ elif args[0] == "pr":
         else:
             print(json.dumps({"state": state["pr"]["state"]}))
     elif sub == "list":
-        if state["pr"]["state"] == "OPEN":
+        requested_state = arg_value(args, "--state")
+        current_state = state["pr"]["state"]
+        if current_state == "NONE":
+            if "--jq" not in args:
+                print("[]")
+        elif requested_state == "open" and current_state != "OPEN":
+            if "--jq" not in args:
+                print("[]")
+        elif current_state == "OPEN" or requested_state == "all":
             numbers = open_pr_numbers()
-            if "--jq" in args:
+            if "@tsv" in cmd_line:
+                for number in numbers:
+                    print(f"{number}\t{current_state}")
+            elif "--jq" in args:
                 for number in numbers:
                     print(number)
             else:
-                print(json.dumps([{"number": number} for number in numbers]))
+                print(json.dumps([{"number": number, "state": current_state} for number in numbers]))
         elif "--jq" not in args:
             print("[]")
     elif sub == "create":
