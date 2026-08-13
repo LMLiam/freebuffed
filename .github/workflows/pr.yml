@@ -17,7 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Validate pull request title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
@@ -28,17 +30,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Collect commit subjects
         env:
           GH_TOKEN: ${{ github.token }}
           COMMITS_URL: ${{ github.event.pull_request.commits_url }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        # Validate only commits that are not already on the base branch. The
-        # fork's main contains upstream mirror sync commits, which are not
-        # conventional; ancestry, not the subject, identifies them.
         run: |
           gh api --paginate "$COMMITS_URL" --jq '.[].sha' > commit-shas.txt
           while read -r sha; do
@@ -49,3 +49,22 @@ jobs:
           done < commit-shas.txt > commit-subjects.txt
       - name: Validate commit subjects
         run: bash .github/scripts/validate-conventional-title.sh --stdin < commit-subjects.txt
+
+  conflict-markers:
+    name: Conflict markers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fail on unresolved conflict markers in changed files
+        if: github.event.pull_request.head.ref == 'sync/upstream'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash .github/scripts/check-conflict-markers.sh "$BASE_SHA" HEAD
+      - name: Skip conflict-marker scan for other branches
+        if: github.event.pull_request.head.ref != 'sync/upstream'
+        run: echo "Conflict-marker scanning applies only to sync/upstream pull requests."

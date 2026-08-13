@@ -1,0 +1,42 @@
+name: Sync upstream
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_URL: https://github.com/CodebuffAI/freebuff.git
+  UPSTREAM_BRANCH: main
+  SYNC_BRANCH: sync/upstream
+
+jobs:
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check for new upstream commits
+        id: check
+        run: bash .github/scripts/upstream-sync-check.sh
+
+      - name: Sync upstream
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: bash .github/scripts/sync-upstream.sh
